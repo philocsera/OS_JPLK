@@ -16,6 +16,9 @@ Protocol with the xv6-side user programs (llmsh, schedhint, osdoc):
 
   <<DOC>> <free text>                  <<TRACE_MASK>> <hex_mask> <ticks>
 
+  <<WORKLOAD>> ... <<WORKLOAD_END>>    <<POLICY>> <0-3>
+                                       <<NOOP>>
+
 Anything outside the marker protocol is passed through to the user's
 terminal verbatim, so a regular xv6 shell session still works.
 
@@ -141,6 +144,26 @@ def handle_doc(question: str, solar: SolarClient) -> str:
     return f"<<TRACE_MASK>> 0x{mask:x} {ticks}"
 
 
+def handle_workload(snapshot: list[str], solar: SolarClient) -> str:
+    """Resolve a <<WORKLOAD>>...<<WORKLOAD_END>> dump → POLICY reply."""
+    try:
+        raw = solar.chat(load_prompt("workload.txt"), "\n".join(snapshot))
+        reply = json.loads(raw)
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"[bridge] workload handler error: {e}", file=sys.stderr)
+        return "<<POLICY>> 0"
+    try:
+        policy_id = int(reply.get("policy_id", 0))
+        reason = reply.get("reason", "")
+    except (ValueError, TypeError):
+        return "<<POLICY>> 0"
+    if policy_id < 0 or policy_id > 3:
+        policy_id = 0
+    print(f"[bridge] workload={reply.get('workload','?')} policy={policy_id} reason={reason}",
+          file=sys.stderr)
+    return f"<<POLICY>> {policy_id}"
+
+
 class Bridge:
     """Glue between QEMU stdio and the LLM."""
 
@@ -157,6 +180,8 @@ class Bridge:
         )
         self._procs_buf: list[str] = []
         self._collecting_procs = False
+        self._workload_buf: list[str] = []
+        self._collecting_workload = False
 
     def write_xv6(self, line: str) -> None:
         if not line.endswith("\n"):
@@ -182,6 +207,22 @@ class Bridge:
         if self._collecting_procs:
             self._procs_buf.append(stripped)
             # Still echo so the user sees the snapshot.
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            return True
+        if stripped == "<<WORKLOAD>>":
+            self._workload_buf = []
+            self._collecting_workload = True
+            return True
+        if stripped == "<<WORKLOAD_END>>":
+            self._collecting_workload = False
+            if self.solar:
+                self.write_xv6(handle_workload(self._workload_buf, self.solar))
+            else:
+                self.write_xv6("<<POLICY>> 0")
+            return True
+        if self._collecting_workload:
+            self._workload_buf.append(stripped)
             sys.stdout.write(line)
             sys.stdout.flush()
             return True

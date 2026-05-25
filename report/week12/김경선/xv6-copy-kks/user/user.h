@@ -42,6 +42,8 @@ int getpriority(int);
 int trace(int);
 int sysinfo(struct sysinfo *);
 int proclist(struct proc_info *, int);
+int setpolicy(int);
+int getpolicy(void);
 
 // ulib.c
 int stat(const char*, struct stat*);

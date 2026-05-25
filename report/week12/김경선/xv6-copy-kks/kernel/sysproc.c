@@ -7,8 +7,24 @@
 #include "proc.h"
 #include "vm.h"
 #include "sysinfo.h"
+#include "policy.h"
 
 extern struct proc proc[];
+
+// Global scheduling policy state.
+// current_policy is read by clockintr() on every timer tick — kept as a
+// plain int because the write (setpolicy syscall) happens at most once per
+// LLM round-trip, so a torn read is harmless in practice.
+int current_policy = POLICY_BALANCED;
+
+// Timeslice duration in RISC-V cycle counts for each policy.
+// Index matches POLICY_* constants in policy.h.
+uint64 policy_timeslice_cycles[4] = {
+  1000000,   // POLICY_BALANCED:     ~0.1s  (xv6 default)
+  4000000,   // POLICY_THROUGHPUT:   ~0.4s  (minimise context switches)
+  250000,    // POLICY_INTERACTIVE:  ~0.025s (maximise responsiveness)
+  2000000,   // POLICY_BACKGROUND:   ~0.2s  (batch-friendly)
+};
 
 // Maximum proc_info entries returned in one sys_proclist call.
 // Sized to NPROC (param.h) so a single snapshot covers the whole table.
@@ -213,4 +229,25 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+// Set the global scheduling policy.
+// policy_id must be in [0, 3]; returns -1 on invalid input.
+uint64
+sys_setpolicy(void)
+{
+  int policy_id;
+
+  argint(0, &policy_id);
+  if(policy_id < POLICY_BALANCED || policy_id > POLICY_BACKGROUND)
+    return -1;
+  current_policy = policy_id;
+  return 0;
+}
+
+// Return the current scheduling policy id.
+uint64
+sys_getpolicy(void)
+{
+  return current_policy;
 }

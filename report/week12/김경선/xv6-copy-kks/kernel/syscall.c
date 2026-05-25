@@ -106,6 +106,8 @@ extern uint64 sys_getpriority(void);
 extern uint64 sys_trace(void);
 extern uint64 sys_sysinfo(void);
 extern uint64 sys_proclist(void);
+extern uint64 sys_setpolicy(void);
+extern uint64 sys_getpolicy(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -136,6 +138,8 @@ static uint64 (*syscalls[])(void) = {
 [SYS_trace]    sys_trace,
 [SYS_sysinfo]  sys_sysinfo,
 [SYS_proclist] sys_proclist,
+[SYS_setpolicy] sys_setpolicy,
+[SYS_getpolicy] sys_getpolicy,
 };
 
 // Names indexed by syscall number, used by the trace logger.
@@ -167,6 +171,8 @@ static char *syscall_names[] = {
 [SYS_trace]    "trace",
 [SYS_sysinfo]  "sysinfo",
 [SYS_proclist] "proclist",
+[SYS_setpolicy] "setpolicy",
+[SYS_getpolicy] "getpolicy",
 };
 
 void

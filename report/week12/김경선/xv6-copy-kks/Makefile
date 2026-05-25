@@ -152,6 +152,7 @@ UPROGS=\
 	$U/_llmsh\
 	$U/_schedhint\
 	$U/_osdoc\
+	$U/_workloadagent\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

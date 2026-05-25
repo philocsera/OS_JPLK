@@ -47,3 +47,5 @@ entry("getpriority");
 entry("trace");
 entry("sysinfo");
 entry("proclist");
+entry("setpolicy");
+entry("getpolicy");

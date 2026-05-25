@@ -25,3 +25,5 @@
 #define SYS_trace       24
 #define SYS_sysinfo     25
 #define SYS_proclist    26
+#define SYS_setpolicy   27
+#define SYS_getpolicy   28

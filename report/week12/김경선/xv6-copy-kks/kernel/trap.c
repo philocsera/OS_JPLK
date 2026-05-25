@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "policy.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -172,9 +173,9 @@ clockintr()
   }
 
   // ask for the next timer interrupt. this also clears
-  // the interrupt request. 1000000 is about a tenth
-  // of a second.
-  w_stimecmp(r_time() + 1000000);
+  // the interrupt request. Duration is determined by the
+  // active scheduling policy (see kernel/policy.h).
+  w_stimecmp(r_time() + policy_timeslice_cycles[current_policy]);
 }
 
 // check if it's an external interrupt or software interrupt,
