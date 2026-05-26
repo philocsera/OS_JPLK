@@ -42,6 +42,30 @@ acquire(struct spinlock *lk)
   lk->cpu = mycpu();
 }
 
+// Try to acquire the lock without spinning. Returns 1 on success
+// (lock is now held by this CPU), 0 on failure (lock was busy).
+// Disables interrupts on success, just like acquire(); on failure
+// interrupts are left in their prior state.
+//
+// Used by procstat_tick() so that clockintr never blocks on a
+// per-proc lock held by another CPU.
+int
+try_acquire(struct spinlock *lk)
+{
+  push_off(); // disable interrupts to avoid deadlock.
+  if(holding(lk))
+    panic("try_acquire");
+
+  if(__sync_lock_test_and_set(&lk->locked, 1) != 0) {
+    pop_off();
+    return 0;
+  }
+
+  __sync_synchronize();
+  lk->cpu = mycpu();
+  return 1;
+}
+
 // Release the lock.
 void
 release(struct spinlock *lk)

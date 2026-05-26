@@ -104,7 +104,7 @@ void            procdump(void);
 struct procstat;
 void            procstat_tick(void);
 int             procstat_get(int pid, struct procstat *out);
-int             procstat_all(struct procstat *dst, int max);
+int             procstat_all_range(int start, int end, struct procstat *dst, int dst_cap);
 int             proc_setclass(int pid, int class_id);
 int             proc_setquantum(int pid, int q);
 
@@ -113,6 +113,7 @@ void            swtch(struct context*, struct context*);
 
 // spinlock.c
 void            acquire(struct spinlock*);
+int             try_acquire(struct spinlock*);
 int             holding(struct spinlock*);
 void            initlock(struct spinlock*, char*);
 void            release(struct spinlock*);

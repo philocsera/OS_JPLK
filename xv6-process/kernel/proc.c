@@ -730,12 +730,14 @@ procstat_tick(void)
 {
   struct proc *p;
   for(p = proc; p < &proc[NPROC]; p++) {
+    // Cheap unlocked state read to skip clearly-unused slots without
+    // touching the lock at all.
     if(p->state == UNUSED)
       continue;
-    // try-acquire. spinlocks in xv6 don't expose try_acquire, so we
-    // gate on the cheap state read and accept that under contention
-    // we drop the tick — the counters are statistical anyway.
-    acquire(&p->lock);
+    // Real non-blocking try-acquire. If another CPU holds p->lock we
+    // drop this tick rather than stall the clock interrupt.
+    if(!try_acquire(&p->lock))
+      continue;
     switch(p->state) {
     case RUNNABLE:
       p->ready_ticks++;
@@ -784,14 +786,21 @@ procstat_get(int pid, struct procstat *out)
   return -1;
 }
 
-// Bulk snapshot for advisord. Fills up to `max` entries of `dst` with
-// procs whose state != UNUSED. Returns the number of entries written.
+// Bulk snapshot for advisord, scoped to a proc[] index range.
+// Scans proc[start..end) and fills non-UNUSED entries into dst (up to
+// dst_cap entries). Returns the number of entries written.
+//
+// The caller (sys_getprocstat_all) chunks the scan so the syscall keeps
+// its kernel stack buffer small — see process.md §6.
 int
-procstat_all(struct procstat *dst, int max)
+procstat_all_range(int start, int end, struct procstat *dst, int dst_cap)
 {
   struct proc *p;
   int n = 0;
-  for(p = proc; p < &proc[NPROC] && n < max; p++) {
+  if(start < 0) start = 0;
+  if(end > NPROC) end = NPROC;
+  for(int i = start; i < end && n < dst_cap; i++) {
+    p = &proc[i];
     acquire(&p->lock);
     if(p->state != UNUSED) {
       dst[n].pid = p->pid;
@@ -807,7 +816,8 @@ procstat_all(struct procstat *dst, int max)
       dst[n].sleep_ticks = p->sleep_ticks;
       dst[n].ctxsw_count = p->ctxsw_count;
       dst[n].lifetime = (uint64)(ticks - p->alloc_tick);
-      for(int i = 0; i < 16; i++) dst[n].name[i] = p->name[i];
+      for(uint k = 0; k < sizeof(dst[n].name); k++)
+        dst[n].name[k] = p->name[k];
       n++;
     }
     release(&p->lock);

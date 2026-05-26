@@ -190,13 +190,19 @@ sys_getprocstat(void)
   return 0;
 }
 
+// Kernel stack is 2*PGSIZE = 8KB. struct procstat is ~80 bytes, so a full
+// PROCSTAT_MAX (=64) buffer would consume ~5KB on stack — too close to the
+// limit once trap frames and call chains are accounted for. Instead we
+// scan proc[] in fixed-size chunks and copyout each chunk separately.
+#define PROCSTAT_CHUNK 8
+
 uint64
 sys_getprocstat_all(void)
 {
   uint64 uaddr;
   int max;
-  struct procstat buf[PROCSTAT_MAX];
-  int n;
+  struct procstat buf[PROCSTAT_CHUNK];
+  int written = 0;
 
   argaddr(0, &uaddr);
   argint(1, &max);
@@ -206,11 +212,23 @@ sys_getprocstat_all(void)
   if(max > PROCSTAT_MAX)
     max = PROCSTAT_MAX;
 
-  n = procstat_all(buf, max);
-  if(copyout(myproc()->pagetable, uaddr,
-             (char *)buf, n * sizeof(struct procstat)) < 0)
-    return -1;
-  return n;
+  pagetable_t pt = myproc()->pagetable;
+
+  for(int start = 0; start < NPROC && written < max; start += PROCSTAT_CHUNK) {
+    int end = start + PROCSTAT_CHUNK;
+    int remaining = max - written;
+    int cap = remaining < PROCSTAT_CHUNK ? remaining : PROCSTAT_CHUNK;
+
+    int n = procstat_all_range(start, end, buf, cap);
+    if(n <= 0)
+      continue;
+
+    if(copyout(pt, uaddr + (uint64)written * sizeof(struct procstat),
+               (char *)buf, n * sizeof(struct procstat)) < 0)
+      return -1;
+    written += n;
+  }
+  return written;
 }
 
 // return how many clock tick interrupts have occurred
