@@ -24,6 +24,6 @@ xv6-RISCV 에 **LLM 어드바이저(advisord)** 를 얹어, 스케줄링·프로
 
 ## 주요 보고서
 
-- **▶ [스케줄러 3종 비교 (Live 페이지)](https://philocsera.github.io/OS_JPLKJ/report/week13/%EC%A1%B0%ED%98%84%EC%84%B1/process_summary.html)** — GitHub Pages 로 호스팅된 인터랙티브 보고서 (소스: [process_summary.html](report/week13/조현성/process_summary.html))
+- **▶ [스케줄러 3종 비교 (Live 페이지)](https://philocsera.github.io/OS_JPLKJ/docs/process_summary.html)** — GitHub Pages 로 호스팅된 인터랙티브 보고서 (소스: [report/week13/조현성/process_summary.html](report/week13/조현성/process_summary.html))
 - [report/week12/조현성/refactoring.md](report/week12/조현성/refactoring.md) — xv6-process 트리 9개 개선 후보 분석
 - [report/week12/조현성/report.md](report/week12/조현성/report.md) — Dead code 제거, kstack 5KB→640B 축소, 진짜 `try_acquire()` 구현
