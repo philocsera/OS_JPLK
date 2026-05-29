@@ -139,6 +139,7 @@ panic(char *s)
   panicking = 1;
   printf("panic: ");
   printf("%s\n", s);
+  eventlog_dump(s);   // sec 07: emit the post-mortem timeline for the host LLM
   panicked = 1; // freeze uart output from other CPUs
   for(;;)
     ;

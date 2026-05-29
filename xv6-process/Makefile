@@ -149,6 +149,15 @@ UPROGS=\
 	$U/_priority_test\
 	$U/_advisord\
 	$U/_advstat\
+	$U/_wl\
+	$U/_priors\
+	$U/_jobtest\
+	$U/_wlagent\
+	$U/_setcls\
+	$U/_iohog\
+	$U/_cc\
+	$U/_fbomb\
+	$U/_crashme\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

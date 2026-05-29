@@ -26,3 +26,10 @@
 #define SYS_setquantum  25
 #define SYS_getprocstat 26
 #define SYS_getprocstat_all 27
+#define SYS_getnamepriors 28
+#define SYS_setjob         29
+#define SYS_getjob         30
+#define SYS_setjobpriority 31
+#define SYS_setjobclass    32
+#define SYS_note           33
+#define SYS_crash          34

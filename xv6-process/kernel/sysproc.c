@@ -231,6 +231,90 @@ sys_getprocstat_all(void)
   return written;
 }
 
+// Copy the exit-statistics prior table into a user buffer. Returns the
+// number of valid entries. NPRIOR is small (16) so the whole table fits on
+// the kernel stack in one shot — no chunking needed.
+uint64
+sys_getnamepriors(void)
+{
+  uint64 uaddr;
+  int max;
+  struct nameprior buf[NPRIOR];
+
+  argaddr(0, &uaddr);
+  argint(1, &max);
+
+  if(max <= 0)
+    return -1;
+  if(max > NPRIOR)
+    max = NPRIOR;
+
+  int n = proc_get_priors(buf, max);
+  if(n < 0)
+    return -1;
+  if(n > 0 && copyout(myproc()->pagetable, uaddr, (char *)buf,
+                      n * sizeof(struct nameprior)) < 0)
+    return -1;
+  return n;
+}
+
+// Job / process-tree grouping (report sec 05).
+uint64
+sys_setjob(void)
+{
+  return proc_setjob();
+}
+
+uint64
+sys_getjob(void)
+{
+  int pid;
+  argint(0, &pid);
+  return proc_getjob(pid);
+}
+
+uint64
+sys_setjobpriority(void)
+{
+  int gid, prio;
+  argint(0, &gid);
+  argint(1, &prio);
+  return proc_setjobpriority(gid, prio);
+}
+
+uint64
+sys_setjobclass(void)
+{
+  int gid, class_id;
+  argint(0, &gid);
+  argint(1, &class_id);
+  return proc_setjobclass(gid, class_id);
+}
+
+// Panic post-mortem support (report sec 07).
+// note(msg): userspace breadcrumb into the event ring.
+uint64
+sys_note(void)
+{
+  char msg[24];
+  if(argstr(0, msg, sizeof(msg)) < 0)
+    return -1;
+  proc_log_event(EV_NOTE, myproc()->pid, myproc()->name, 0, 0, msg);
+  return 0;
+}
+
+// crash(msg): deliberately panic, to demonstrate the post-mortem timeline.
+// A debug-only hook — the real value is the @@PANIC dump panic() emits.
+uint64
+sys_crash(void)
+{
+  char msg[32];
+  if(argstr(0, msg, sizeof(msg)) < 0)
+    return -1;
+  panic(msg);   // never returns
+  return 0;
+}
+
 // return how many clock tick interrupts have occurred
 // since start.
 uint64

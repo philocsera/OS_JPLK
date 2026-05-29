@@ -107,6 +107,21 @@ int             procstat_get(int pid, struct procstat *out);
 int             procstat_all_range(int start, int end, struct procstat *dst, int dst_cap);
 int             proc_setclass(int pid, int class_id);
 int             proc_setquantum(int pid, int q);
+// exit-statistics learning — see kernel/procstat.h sec 04
+struct nameprior;
+void            proc_learn_on_exit(struct proc *p);
+void            proc_seed_from_prior(struct proc *p);
+int             proc_get_priors(struct nameprior *dst, int max);
+// job / process-tree grouping — see kernel/procstat.h sec 05
+int             proc_setjob(void);
+int             proc_getjob(int pid);
+int             proc_setjobpriority(int group_id, int priority);
+int             proc_setjobclass(int group_id, int class_id);
+int             proc_group_count(int group_id);
+// panic post-mortem event ring — see kernel/proc.c sec 07
+void            proc_log_event(int type, int pid, const char *name, uint64 d1, uint64 d2, const char *msg);
+void            eventlog_dump(const char *reason);
+#define EV_NOTE 0
 
 // swtch.S
 void            swtch(struct context*, struct context*);
