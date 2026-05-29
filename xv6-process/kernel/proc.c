@@ -899,11 +899,20 @@ proc_setclass(int pid, int class_id)
   for(p = proc; p < &proc[NPROC]; p++) {
     acquire(&p->lock);
     if(p->pid == pid && p->state != UNUSED) {
+      int old = p->class_id;
       p->class_id = class_id;
       // class change auto-updates the recommended quantum, but the
       // advisor can override via setquantum afterward.
       p->quantum_ticks = class_default_quantum[class_id];
+      char nm[16];
+      safestrcpy(nm, p->name, sizeof(nm));
       release(&p->lock);
+      // Record the advisor's decision in the event ring so it shows up in
+      // the sec-07 @@PANIC timeline. Logged outside p->lock (order is always
+      // p->lock -> ev_lock; eventlog never takes p->lock). Only on a real
+      // change, to avoid flooding the 32-slot ring with no-op rewrites.
+      if(old != class_id)
+        proc_log_event(EV_CLASS, pid, nm, old, class_id, "set");
       return 0;
     }
     release(&p->lock);
@@ -1178,13 +1187,24 @@ proc_setjobclass(int group_id, int class_id)
   int count = 0;
   struct proc *p;
   for(p = proc; p < &proc[NPROC]; p++) {
+    int old = -1, pid = -1, matched = 0;
+    char nm[16];
     acquire(&p->lock);
     if(p->state != UNUSED && p->group_id == group_id) {
+      old = p->class_id;
       p->class_id = class_id;
       p->quantum_ticks = class_default_quantum[class_id];
-      count++;
+      pid = p->pid;
+      safestrcpy(nm, p->name, sizeof(nm));
+      matched = 1;
     }
     release(&p->lock);
+    if(matched) {
+      // See proc_setclass: log the whole-job decision outside p->lock.
+      if(old != class_id)
+        proc_log_event(EV_CLASS, pid, nm, old, class_id, "job");
+      count++;
+    }
   }
   return count;
 }
