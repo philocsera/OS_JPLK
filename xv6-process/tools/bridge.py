@@ -16,6 +16,13 @@ Flow:
   4. For every process whose class changed, type `setcls <pid> <id>` into
      the shell — applying the LLM's decision through the real setclass syscall.
 
+Fork-bomb pre-emption (report sec 06): the kernel's per-job fork cap is a
+hard numeric backstop. On top of it, the bridge watches each job-GROUP's size
+and asks the LLM "legit parallel build vs runaway fork bomb?". If the LLM says
+bomb, the bridge pre-emptively demotes the whole group with `setjprio <group>
+19` — throttling it on the scheduler before the cap is the deciding factor,
+without killing it. Disable with --no-defend.
+
 Fail-static safety (mirrors the kernel design): if the LLM is unreachable,
 times out, or returns garbage, we fall back to the same heuristic the in-guest
 advisord uses, and never send an out-of-range class (the kernel would reject
@@ -67,6 +74,95 @@ def heuristic(p):
     if run * 4 > active:
         return 4 if p["name"] in BATCH_NAMES else 3  # BATCH / CPU_BOUND
     return 2
+
+
+# --------------------------------------------------------------------------
+# Fork-bomb pre-emption (report sec 06): judge a whole job-GROUP as a legit
+# parallel build or a runaway fork bomb, then (if bomb) demote it via setjprio.
+# --------------------------------------------------------------------------
+def group_features(members):
+    """Aggregate one job-group's @@WL members into the signal the judge needs."""
+    n = len(members)
+    return {
+        "group": members[0].get("group", members[0]["pid"]),
+        "count": n,
+        "names": [m["name"] for m in members],
+        "avg_run": sum(m["run"] for m in members) // n,
+        "avg_sleep": sum(m["sleep"] for m in members) // n,
+        "min_life": min(m["life"] for m in members),
+    }
+
+
+def heuristic_group(info):
+    """Fallback verdict when the LLM is unavailable. Mirrors the prompt's rule:
+    a legit build is a few build-tool procs doing real CPU work; a bomb is many
+    near-idle clones spawned almost simultaneously."""
+    names = info["names"]
+    distinct = len(set(names))
+    if info["count"] < 3:
+        return "build"
+    # build tools actually compiling (real CPU work) -> legit
+    if any(n in BATCH_NAMES for n in names) and info["avg_run"] >= 3:
+        return "build"
+    # a swarm of same-named, near-idle, freshly-spawned procs -> bomb
+    if info["count"] >= 6 and info["avg_run"] < 3 and distinct <= 2:
+        return "bomb"
+    if info["count"] >= 10:
+        return "bomb"
+    return "build"
+
+
+def llm_judge_group(info, model, host, timeout):
+    """Ask the local LLM to label a job-group build|bomb. Raises on failure."""
+    sys_prompt = (
+        "You are a scheduler guard for a teaching OS. Decide whether a process "
+        "job-GROUP is a LEGITIMATE parallel build (like `make -j` launching "
+        "cc/gcc/ld) or a runaway FORK BOMB that should be throttled.\n"
+        "Per-group signals: count=live processes; names=their program names; "
+        "avg_run=avg CPU ticks per proc; avg_sleep=avg sleep ticks; "
+        "min_life=age in ticks of the youngest proc.\n"
+        "Rules of thumb: a legit build = a HANDFUL of build-tool-named procs "
+        "each doing REAL CPU work (avg_run high). A fork bomb = MANY procs with "
+        "the SAME or generic name, each doing little real work (avg_run near 0), "
+        "all spawned almost simultaneously (min_life small).\n"
+        'Reply ONLY as JSON: {"verdict":"build"|"bomb","reason":"<short>"}\n'
+        "Examples:\n"
+        '{"count":4,"names":["cc","cc","gcc","ld"],"avg_run":22,"avg_sleep":1,'
+        '"min_life":35} -> {"verdict":"build","reason":"few build tools doing real work"}\n'
+        '{"count":12,"names":["ftree","ftree","ftree"],"avg_run":0,"avg_sleep":8,'
+        '"min_life":2} -> {"verdict":"bomb","reason":"many idle clones spawned at once"}'
+    )
+    body = json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": json.dumps(info)},
+        ],
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0},
+    }).encode()
+    req = urllib.request.Request(
+        f"http://{host}/api/chat", data=body,
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read().decode())
+    verdict = str(json.loads(payload["message"]["content"]).get("verdict", "")).lower()
+    if verdict not in ("build", "bomb"):
+        raise ValueError(f"bad verdict {verdict!r}")
+    return verdict
+
+
+def judge_group(info, args):
+    """Return (verdict, source), preferring the LLM, falling back to heuristic."""
+    if not args.no_llm:
+        try:
+            return llm_judge_group(info, args.model, args.ollama_host,
+                                   args.timeout), "LLM"
+        except (urllib.error.URLError, OSError, KeyError, ValueError,
+                json.JSONDecodeError) as e:
+            log(f"group judge LLM unavailable ({type(e).__name__}); heuristic")
+    return heuristic_group(info), "heuristic"
 
 
 # --------------------------------------------------------------------------
@@ -187,6 +283,12 @@ def main():
     ap.add_argument("--workload", default="spin",
                     help="comma-separated guest commands to launch in the "
                          "background first (e.g. spin,iohog,cc)")
+    ap.add_argument("--no-defend", action="store_true",
+                    help="disable LLM fork-bomb pre-emption (sec 06)")
+    ap.add_argument("--bomb-threshold", type=int, default=6,
+                    help="job-group size that triggers a build-vs-bomb judgment")
+    ap.add_argument("--bomb-prio", type=int, default=19,
+                    help="priority a judged fork-bomb group is demoted to (0..20)")
     args = ap.parse_args()
 
     cmd = qemu_command(args.kernel, args.fsimg, args.cpus)
@@ -201,8 +303,10 @@ def main():
     child.sendline(f"wlagent {args.poll} &")
     log("wlagent launched; entering classify loop")
 
-    last_sent = {}     # pid -> last class_id we applied (avoid redundant setcls)
-    cold_done = set()  # pids already classified by the LLM (hybrid mode)
+    last_sent = {}        # pid -> last class_id we applied (avoid redundant setcls)
+    cold_done = set()     # pids already classified by the LLM (hybrid mode)
+    judged_groups = {}    # group_id -> "build"|"bomb" (sec 06, judge once)
+    demoted_groups = set()  # groups already throttled via setjprio
     deadline = time.time() + args.duration
 
     while time.time() < deadline:
@@ -223,6 +327,30 @@ def main():
         if not procs:
             continue
 
+        # --- Fork-bomb pre-emption (sec 06): judge each ballooning group once,
+        # and throttle the whole job via setjprio if the LLM calls it a bomb. ---
+        if not args.no_defend:
+            groups = {}
+            for p in procs:
+                groups.setdefault(p.get("group", p["pid"]), []).append(p)
+            for g, members in groups.items():
+                if g in judged_groups or len(members) < args.bomb_threshold:
+                    continue
+                info = group_features(members)
+                verdict, jsrc = judge_group(info, args)
+                judged_groups[g] = verdict
+                log(f"group {g}: {info['count']} proc(s) {sorted(set(info['names']))} "
+                    f"run~{info['avg_run']} life>={info['min_life']} -> {verdict} via {jsrc}")
+                if verdict == "bomb":
+                    demoted_groups.add(g)
+                    log(f"  PRE-EMPT fork-bomb: setjprio {g} {args.bomb_prio}")
+                    child.sendline(f"setjprio {g} {args.bomb_prio}")
+                    try:
+                        child.expect(r"setjprio: .*\r?\n", timeout=3)
+                        log(f"  guest: {child.after.strip()}")
+                    except (pexpect.TIMEOUT, pexpect.EOF):
+                        pass
+
         # Hybrid: only ask the LLM about processes we have NOT classified yet
         # (their cold-start). Already-decided pids cost zero LLM calls.
         if args.hybrid:
@@ -238,6 +366,9 @@ def main():
             cold_done.update(p["pid"] for p in targets)
         for p in targets:
             pid = p["pid"]
+            # Don't let a class->priority nudge undo a fork-bomb demotion.
+            if p.get("group") in demoted_groups:
+                continue
             new = decisions.get(pid)
             if new is None or new == p["class"] or last_sent.get(pid) == new:
                 continue

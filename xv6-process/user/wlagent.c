@@ -3,7 +3,7 @@
 // Runs as a background daemon. Every POLL ticks it snapshots the procstat
 // table and emits ONE line to the console framed as:
 //
-//   @@WL [{"pid":5,"name":"spin","run":40,"sleep":0,"ready":2,"life":42,"class":2}, ...]
+//   @@WL [{"pid":5,"name":"spin","run":40,"sleep":0,"ready":2,"life":42,"class":2,"group":5}, ...]
 //
 // A host process (tools/bridge.py) reads these frames over QEMU's stdio,
 // asks a local open LLM to classify each process, and writes the decision
@@ -53,9 +53,9 @@ main(int argc, char *argv[])
         printf(",");
       first = 0;
       printf("{\"pid\":%d,\"name\":\"%s\",\"run\":%ld,\"sleep\":%ld,"
-             "\"ready\":%ld,\"life\":%ld,\"class\":%d}",
+             "\"ready\":%ld,\"life\":%ld,\"class\":%d,\"group\":%d}",
              p->pid, p->name, p->run_ticks, p->sleep_ticks,
-             p->ready_ticks, p->lifetime, p->class_id);
+             p->ready_ticks, p->lifetime, p->class_id, p->group_id);
     }
     printf("]\n");
 

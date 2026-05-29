@@ -158,6 +158,8 @@ UPROGS=\
 	$U/_cc\
 	$U/_fbomb\
 	$U/_crashme\
+	$U/_setjprio\
+	$U/_ftree\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
