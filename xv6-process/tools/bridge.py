@@ -305,7 +305,11 @@ def main():
 
     last_sent = {}        # pid -> last class_id we applied (avoid redundant setcls)
     cold_done = set()     # pids already classified by the LLM (hybrid mode)
-    judged_groups = {}    # group_id -> "build"|"bomb" (sec 06, judge once)
+    # sec 06 defense state. By design each group is judged ONCE (at its first
+    # threshold crossing) and a 'bomb' demotion is TERMINAL — appropriate for a
+    # bounded demo; a production guard would re-evaluate on continued growth and
+    # lift the demotion if a group later looks legitimate.
+    judged_groups = {}    # group_id -> "build"|"bomb"
     demoted_groups = set()  # groups already throttled via setjprio
     deadline = time.time() + args.duration
 
@@ -367,7 +371,8 @@ def main():
         for p in targets:
             pid = p["pid"]
             # Don't let a class->priority nudge undo a fork-bomb demotion.
-            if p.get("group") in demoted_groups:
+            # Key exactly as the defense pass does (same group fallback).
+            if p.get("group", pid) in demoted_groups:
                 continue
             new = decisions.get(pid)
             if new is None or new == p["class"] or last_sent.get(pid) == new:
