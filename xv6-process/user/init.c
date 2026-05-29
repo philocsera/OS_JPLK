@@ -23,6 +23,18 @@ main(void)
   dup(0);  // stdout
   dup(0);  // stderr
 
+  // Restore scheduler priors learned before the last reboot (report sec 04).
+  // Best-effort: a missing/corrupt /priors.db is a silent no-op in `priors
+  // load`, so this can never wedge boot. Wait for it so the table is in place
+  // before sh (and any workload) starts.
+  if((pid = fork()) == 0){
+    char *av[] = { "priors", "load", "/priors.db", 0 };
+    exec("priors", av);
+    exit(0);   // priors binary missing — continue booting regardless
+  }
+  if(pid > 0)
+    wait((int *) 0);
+
   for(;;){
     printf("init: starting sh\n");
     pid = fork();

@@ -112,6 +112,7 @@ struct nameprior;
 void            proc_learn_on_exit(struct proc *p);
 void            proc_seed_from_prior(struct proc *p);
 int             proc_get_priors(struct nameprior *dst, int max);
+int             proc_set_priors(struct nameprior *src, int n);
 // job / process-tree grouping — see kernel/procstat.h sec 05
 int             proc_setjob(void);
 int             proc_getjob(int pid);

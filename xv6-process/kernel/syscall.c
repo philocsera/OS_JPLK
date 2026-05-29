@@ -114,6 +114,7 @@ extern uint64 sys_setjobpriority(void);
 extern uint64 sys_setjobclass(void);
 extern uint64 sys_note(void);
 extern uint64 sys_crash(void);
+extern uint64 sys_setnamepriors(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -152,6 +153,7 @@ static uint64 (*syscalls[])(void) = {
 [SYS_setjobclass]   sys_setjobclass,
 [SYS_note]          sys_note,
 [SYS_crash]         sys_crash,
+[SYS_setnamepriors] sys_setnamepriors,
 };
 
 void

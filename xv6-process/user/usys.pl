@@ -55,3 +55,4 @@ entry("setjobpriority");
 entry("setjobclass");
 entry("note");
 entry("crash");
+entry("setnamepriors");

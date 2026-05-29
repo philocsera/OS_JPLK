@@ -258,6 +258,30 @@ sys_getnamepriors(void)
   return n;
 }
 
+// Install a prior table from userspace (report sec 04 persistence). `priors
+// load` reads a file saved before reboot and pushes it back in through here;
+// proc_set_priors re-validates every entry. NPRIOR is small so the whole
+// table fits the kernel stack in one copyin.
+uint64
+sys_setnamepriors(void)
+{
+  uint64 uaddr;
+  int n;
+  struct nameprior buf[NPRIOR];
+
+  argaddr(0, &uaddr);
+  argint(1, &n);
+
+  if(n <= 0)
+    return 0;
+  if(n > NPRIOR)
+    n = NPRIOR;
+  if(copyin(myproc()->pagetable, (char *)buf, uaddr,
+            n * sizeof(struct nameprior)) < 0)
+    return -1;
+  return proc_set_priors(buf, n);
+}
+
 // Job / process-tree grouping (report sec 05).
 uint64
 sys_setjob(void)

@@ -34,6 +34,7 @@ int getprocstat(int pid, struct procstat *out);
 int getprocstat_all(struct procstat *arr, int max);
 struct nameprior;
 int getnamepriors(struct nameprior *arr, int max);
+int setnamepriors(struct nameprior *arr, int n);
 // job / process-tree grouping — see kernel/procstat.h sec 05
 int setjob(void);
 int getjob(int pid);

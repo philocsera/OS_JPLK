@@ -33,3 +33,4 @@
 #define SYS_setjobclass    32
 #define SYS_note           33
 #define SYS_crash          34
+#define SYS_setnamepriors  35

@@ -1050,6 +1050,41 @@ proc_get_priors(struct nameprior *dst, int max)
   return n;
 }
 
+// Install a userspace-supplied prior table (report sec 04 persistence). The
+// kernel table is reboot-volatile, so `priors save` dumps it to a file before
+// reboot and `priors load` (run from init at boot) restores it through here.
+// Every entry is re-validated — userspace data is untrusted — and the live
+// table is fully replaced. Returns the number of entries installed.
+int
+proc_set_priors(struct nameprior *src, int n)
+{
+  if(n < 0)
+    n = 0;
+  if(n > NPRIOR)
+    n = NPRIOR;
+  acquire(&prior_lock);
+  for(int i = 0; i < NPRIOR; i++)        // clear, then compact valid entries in
+    name_priors[i].valid = 0;
+  int installed = 0;
+  for(int i = 0; i < n; i++) {
+    struct nameprior *s = &src[i];
+    if(!s->valid || s->name[0] == '\0')
+      continue;
+    if(s->class_id < 0 || s->class_id >= NCLASS)
+      continue;
+    struct nameprior *e = &name_priors[installed];
+    safestrcpy(e->name, s->name, sizeof(e->name));  // bounds + NUL-terminates
+    e->valid     = 1;
+    e->class_id  = s->class_id;
+    e->samples   = s->samples ? s->samples : 1;  // >=1 so seeding is eligible
+    e->avg_run   = s->avg_run;
+    e->avg_sleep = s->avg_sleep;
+    installed++;
+  }
+  release(&prior_lock);
+  return installed;
+}
+
 // ===========================================================================
 // Job / process-tree grouping (report sec 05).
 //
