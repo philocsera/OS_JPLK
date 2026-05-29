@@ -37,10 +37,34 @@ state_name(int s)
   }
 }
 
+// xv6's user printf understands no field-width flags (%3d, %-16s, %5ld are
+// printed literally), so columns are aligned by hand. padnum right-aligns a
+// number in a w-wide field; padstr left-aligns a string.
+static void
+padnum(long v, int w)
+{
+  long t = (v < 0) ? -v : v;
+  int digits = (v < 0) ? 1 : 0;   // sign
+  do { digits++; t /= 10; } while(t > 0);
+  for(int i = digits; i < w; i++)
+    printf(" ");
+  printf("%ld", v);
+}
+
+static void
+padstr(const char *s, int w)
+{
+  int n = strlen(s);
+  printf("%s", s);
+  for(int i = n; i < w; i++)
+    printf(" ");
+}
+
 int
 main(int argc, char *argv[])
 {
-  struct procstat buf[PROCSTAT_MAX];
+  // ~5.5KB (88 B * 64) — must be static, not on the 1-page user stack.
+  static struct procstat buf[PROCSTAT_MAX];
   int n = getprocstat_all(buf, PROCSTAT_MAX);
   if(n < 0) {
     printf("advstat: getprocstat_all failed\n");
@@ -50,11 +74,19 @@ main(int argc, char *argv[])
   printf("pid ppid state  name             prio cls quan   run   rdy   slp   cs life\n");
   for(int i = 0; i < n; i++) {
     struct procstat *p = &buf[i];
-    printf("%3d %4d %s %-16s %3d %s %3d %5ld %5ld %5ld %4ld %4ld\n",
-           p->pid, p->ppid, state_name(p->state), p->name,
-           p->priority, class_name(p->class_id), p->quantum_ticks,
-           p->run_ticks, p->ready_ticks, p->sleep_ticks,
-           p->ctxsw_count, p->lifetime);
+    padnum(p->pid, 3);            printf(" ");
+    padnum(p->ppid, 4);           printf(" ");
+    printf("%s ", state_name(p->state));      // already 6 chars wide
+    padstr(p->name, 16);          printf(" ");
+    padnum(p->priority, 4);       printf(" ");
+    printf("%s ", class_name(p->class_id));   // already 3 chars wide
+    padnum(p->quantum_ticks, 4);  printf(" ");
+    padnum(p->run_ticks, 5);      printf(" ");
+    padnum(p->ready_ticks, 5);    printf(" ");
+    padnum(p->sleep_ticks, 5);    printf(" ");
+    padnum(p->ctxsw_count, 4);    printf(" ");
+    padnum(p->lifetime, 4);
+    printf("\n");
   }
   exit(0);
 }

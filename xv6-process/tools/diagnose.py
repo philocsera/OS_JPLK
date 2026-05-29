@@ -54,23 +54,73 @@ def capture_timeline(args):
     return "\n".join(lines)
 
 
+SYS_PROMPT = (
+    "You are an operating-system post-mortem analyst for a teaching OS (xv6) "
+    "whose scheduler is job-aware and has a built-in anti-fork-bomb defense. "
+    "You receive a kernel panic timeline; read it precisely.\n"
+    "\n"
+    "Line formats:\n"
+    "- @@PANIC reason=\"...\" tick=T events=N  -- the panic itself. `reason` is "
+    "the exact kernel panic string; tie your root cause to it verbatim.\n"
+    "- @@EV tick=T type=TYPE pid=P name=NAME d1=X d2=Y msg=M  -- one event.\n"
+    "\n"
+    "Event types and what d1/d2 mean:\n"
+    "- NOTE: a userspace breadcrumb (note() syscall). msg = the text.\n"
+    "- EXIT: process NAME (pid P) exited. d1 = total run-ticks, d2 = total "
+    "sleep-ticks. High run with ~0 sleep = CPU-bound/spinning; high sleep = "
+    "I/O- or sleep-bound.\n"
+    "- FORKFAIL: the kernel REFUSED a fork(). This is the per-job process cap "
+    "(GROUP_PROC_LIMIT) working AS DESIGNED -- it is NOT out-of-memory, NOT "
+    "'insufficient resources', and NOT a kernel bug. pid P (name NAME) tried "
+    "to fork while its job-group already held the maximum live processes. "
+    "d1 = the job-group id, d2 = live procs in that group at the refusal "
+    "(equals the cap), msg=cap confirms the cap fired. A burst of FORKFAIL "
+    "sharing one d1 is a fork bomb being contained.\n"
+    "- CLASS: the advisor reclassified a process. d1 = old class, d2 = new.\n"
+    "\n"
+    "Write a plain-language post-mortem in 3-5 sentences: (1) the sequence of "
+    "events that led to the panic, citing concrete evidence (names, ticks, the "
+    "FORKFAIL pattern, EXIT run/sleep counts); (2) the most likely root cause, "
+    "tied to the exact @@PANIC reason string. Never call FORKFAIL "
+    "'insufficient memory/resources' -- it is a deliberate cap. If FORKFAILs "
+    "precede the panic, say the fork-bomb defense was engaged and judge whether "
+    "the panic is caused by that load or is independent of it."
+)
+
+# One-shot example with DIFFERENT surface details than crashme, so the model
+# learns the field mapping (esp. FORKFAIL = cap, not OOM) rather than parroting.
+FEWSHOT_TIMELINE = (
+    "@@PANIC reason=\"kerneltrap\" tick=210 events=6\n"
+    "@@EV tick=12 type=NOTE pid=4 name=server d1=0 d2=0 msg=accepting\n"
+    "@@EV tick=40 type=EXIT pid=5 name=worker d1=31 d2=2 msg=\n"
+    "@@EV tick=88 type=FORKFAIL pid=6 name=flood d1=6 d2=16 msg=cap\n"
+    "@@EV tick=89 type=FORKFAIL pid=6 name=flood d1=6 d2=16 msg=cap\n"
+    "@@EV tick=90 type=FORKFAIL pid=6 name=flood d1=6 d2=16 msg=cap\n"
+    "@@EV tick=205 type=NOTE pid=6 name=flood d1=0 d2=0 msg=still spawning\n"
+    "@@PANIC_END"
+)
+FEWSHOT_ANSWER = (
+    "At tick 12 a process `server` (pid 4) logged that it was accepting work, "
+    "and a short CPU-heavy `worker` (pid 5, 31 run-ticks vs 2 sleep) exited "
+    "normally at tick 40. From tick 88 on, pid 6 `flood` repeatedly hit "
+    "FORKFAIL on job-group 6, each time with 16 live procs (d2) and msg=cap -- "
+    "the per-job fork-bomb cap was refusing its excess forks exactly as "
+    "designed, so this is containment, not memory exhaustion. Its 'still "
+    "spawning' breadcrumb at tick 205 shows it kept hammering fork despite the "
+    "cap. The panic reason 'kerneltrap' at tick 210 indicates a faulting "
+    "kernel instruction rather than the cap itself, so the most likely root "
+    "cause is a kernel bug exposed under the fork-storm load -- the cap was "
+    "working and merely bounded the runaway tree."
+)
+
+
 def diagnose(timeline, model, host, timeout):
-    sys_prompt = (
-        "You are an operating-system post-mortem analyst. You are given a "
-        "kernel panic timeline from a teaching OS (xv6). Each @@EV line is an "
-        "event with a tick (time), a type (NOTE=app breadcrumb, EXIT=process "
-        "exited with d1=run-ticks d2=sleep-ticks, FORKFAIL=a fork was denied "
-        "with d1=job-group d2=live-procs-in-job, CLASS=reclassified). The "
-        "@@PANIC line gives the panic reason.\n"
-        "Explain in plain language, in 3-5 sentences: what sequence of events "
-        "led to the panic, and the most likely root cause. Be concrete and "
-        "reference the evidence (process names, the FORKFAIL pattern, the "
-        "panic reason)."
-    )
     body = json.dumps({
         "model": model,
         "messages": [
-            {"role": "system", "content": sys_prompt},
+            {"role": "system", "content": SYS_PROMPT},
+            {"role": "user", "content": FEWSHOT_TIMELINE},
+            {"role": "assistant", "content": FEWSHOT_ANSWER},
             {"role": "user", "content": timeline},
         ],
         "stream": False,

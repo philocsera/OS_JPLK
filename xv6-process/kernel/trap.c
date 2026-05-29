@@ -176,15 +176,19 @@ void
 clockintr()
 {
   if(cpuid() == 0){
+    // Sample per-process states BEFORE wakeup(&ticks) below. A process
+    // blocked in pause(n)/sleep(n) sleeps on &ticks; if we woke it first
+    // it would be RUNNABLE at sample time and get mis-credited ready_ticks
+    // for a tick it actually spent sleeping. procstat_tick() only ++'s its
+    // own counters and never reads `ticks`, so sampling before the
+    // increment is correct. Runs only on cpu 0 so each tick credits exactly
+    // one increment per proc. See proc.c:procstat_tick().
+    procstat_tick();
+
     acquire(&tickslock);
     ticks++;
     wakeup(&ticks);
     release(&tickslock);
-
-    // Maintain per-process tick counters for the LLM advisor. Runs
-    // only on cpu 0 so each tick credits exactly one increment per
-    // proc. See proc.c:procstat_tick().
-    procstat_tick();
   }
 
   // ask for the next timer interrupt. this also clears
