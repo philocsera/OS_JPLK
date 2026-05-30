@@ -146,5 +146,83 @@ python3 tools/diagnose.py --workload crashme
 - **PR**: philocsera/OS_JPLKJ **#1** (`feat/llm-advisor-sec04-07` → main).
 
 ### 7.7 갱신된 미완
-- **Plan A — virtio-console 전용 채널** (콘솔 인터리빙 근본 해결책, 미구현).
+- **Plan A — virtio-console 전용 채널** (콘솔 인터리빙 근본 해결책) → **§8에서 완료**.
 - **LLM 지연 튜닝**(qwen2.5:1.5b 비교/하이브리드 기본화 등), 미적용.
+
+---
+
+## 8. (추가) Plan A — virtio-console 전용 채널 구현·검증 (2026-05-30)
+
+§6/§7.7의 마지막 핵심 미완이던 **콘솔 인터리빙 근본 해결**을 완료했다. 어드바이저
+프로토콜(`@@WL` 프레임 + `setcls`/`setjprio` 명령)을 UART 콘솔이 아닌 **전용
+virtio-console 디바이스**로 분리해, 사람용 셸과 절대 섞이지 않게 했다.
+
+### 8.1 가장 큰 리스크부터 스파이크로 제거
+todo.md가 경고한 핵심 불확실성 = "QEMU `virtio-serial-device`+`virtconsole`가
+**multiport 미협상**(control queue 없이) 모드에서 queue 0/1을 chardev에 라우팅하는가".
+16개 파일을 건드리기 전에 최소 드라이버(init + 배너 1줄 TX)만 만들어 검증 →
+호스트 유닉스 소켓에서 배너 수신 **PASS**. control queue 처리 불필요 확정 후 본구현 착수.
+
+### 8.2 커널 드라이버 (`kernel/virtio_console.c`, 신규 ~290줄)
+- **2번째 virtio-mmio 슬롯** `0x10002000`/IRQ 2 (qemu virt DTB로 확인). `memlayout.h`에
+  `VIRTIO1`/`VIRTIO1_IRQ`, `vm.c` 커널 페이지테이블에 MMIO 매핑 추가(누락 시 scause 0xd).
+- **non-multiport**: `VIRTIO_CONSOLE_F_MULTIPORT`를 협상하지 않아 디바이스가 단순
+  2-큐 콘솔로 degrade → queue 0=rx(host→guest), 1=tx(guest→host), control queue 없음.
+- **인터럽트 구동 양방향**: rx 버퍼 NUM개 선등록(device가 채움)→intr에서 커널 입력
+  링으로 복사 후 재등록·`wakeup`; tx는 free 디스크립터에 유저 버퍼 복사·제출 후 완료
+  intr까지 `sleep`. `spinlock` 1개로 직렬화, `read`는 콘솔처럼 **줄 단위**(`\n`)로 반환.
+- `plic.c`(IRQ enable), `trap.c`(`VIRTIO1_IRQ`→`virtio_console_intr`), `main.c`(init),
+  `defs.h` 배선. 디바이스 파일 `/advisor`(major `ADVISOR=2`)로 `devsw` 등록, `init.c`가
+  부팅 시 `mknod /advisor`.
+
+### 8.3 게스트 데몬 (`user/advd.c`, 신규)
+- `/advisor`를 열고 `fork`: **writer 자식**이 poll틱마다 procstat 프레임 송신,
+  **reader 부모**가 명령 줄을 읽어 `setclass`+`setpriority`/`setjobpriority` **직접
+  syscall**로 적용하고 `@@OK`/`@@ERR` 한 줄 회신.
+- **핵심 정확성**: xv6 유저 `printf`는 1바이트씩 `write` → 두 writer가 섞임. 그래서
+  각 프레임·ack를 **버퍼에 조립해 단일 `write()`**로 방출(커널이 write() 한 번을 락으로
+  원자화 → 줄 단위 무섞임 보장). exec 없이 in-process 적용이라 콘솔 출력 0.
+
+### 8.4 호스트 브리지 (`tools/bridge.py`)
+- 부팅·워크로드/`advd` 1회 기동만 pexpect(콘솔), **프로토콜 루프는 유닉스 소켓**으로 전환.
+  `Channel` 줄버퍼 리더/라이터 추가, 프레임 파싱·LLM 분류·sec06 방어 로직은 **그대로**(전송만 교체).
+  QEMU 인자에 virtio-serial+socket chardev 추가(`Makefile` `qemu` 타깃·브리지 양쪽,
+  `server=on,wait=off`라 브리지 없이도 부팅).
+
+### 8.5 검증 (전 경로 실측, QEMU smp3)
+- **스파이크 TX**: 호스트 소켓에서 배너 수신 ✅
+- **양방향 E2E**(`tools/test_advd.py`): 소켓으로 프레임 수신 → `setcls` 송신 → `@@OK
+  setcls pid=5 cls=3 prio=12` ack → 다음 프레임에서 class=3 반영 ✅
+- **콘솔 청정성**(근본 목표): 라이브 브리지 실행 중 UART 캡처에 `@@WL`·`@@OK`·`setcls`
+  **각각 0건**, 셸엔 1회성 `spin &`/`advd 3 &` 에코만 → 인터리빙 완전 제거 **실증** ✅
+- **sec06 방어 경로**: `ftree 12` 13-proc 그룹을 소켓으로 bomb 판정→`setjprio 5 19` 송신→
+  `@@OK setjprio group=5 prio=19 procs=13` ✅
+- **실 LLM 경로**(Ollama qwen2.5:3b): 소켓 위에서 `cc`가 NORMAL→CPU_BOUND→**BATCH**
+  (이름 기반 분류) 정상 ✅
+- **회귀**: `priority_test` "All tests passed!" 무손상(전용 디바이스 배선 후에도) ✅
+
+### 8.6 이번 변경 요약
+- 커널 신규: `virtio_console.c`. 수정: `memlayout.h`·`vm.c`·`virtio.h`·`plic.c`·`trap.c`·
+  `main.c`·`defs.h`·`file.h`(ADVISOR major).
+- 유저 신규: `advd.c`. 수정: `init.c`(mknod), `Makefile`(OBJS·UPROGS·QEMUOPTS).
+- 호스트: `bridge.py`(소켓 전송), 신규 `tools/test_advd.py`, `tools/README.md`(전용 채널 절).
+- 한계/남음: 큐 깊이(NUM=8)·rx 버퍼 256B는 데모 규격(프레임·명령엔 충분, 대용량 백프레셔
+  미세튜닝은 미적용). LLM 지연 튜닝은 여전히 열린 개선 항목.
+
+### 8.7 적대적 멀티에이전트 리뷰 (Plan A) + 반영
+커밋 전, §7.5와 동일한 방식으로 신규 코드(드라이버·데몬·브리지)를 차원별 병렬 리뷰 →
+발견마다 **2개의 서로 다른 시각(정확성/재현성) 스켑틱이 독립 반박**. 총 **16건 제기 →
+13건 반박, 3건 split(한쪽 real·한쪽 refuted), confirmed 0건**. split 3건을 직접 판정:
+- **(반영) `virtio_console_write` 비살해성(uninterruptible) sleep** — `virtio_console_read`·
+  `consoleread`는 sleep 전에 `killed(myproc())`를 확인하나 write 경로엔 누락. 호스트
+  브리지가 연결됐으나 소켓을 안 읽어 백프레셔가 걸리면(QEMU가 virtio-serial 포트
+  throttle) tx가 영영 완료 안 돼 advd writer가 **kill 불가**로 멈춤. → 두 sleep 앞에
+  read 경로와 동일한 `killed` 체크 추가(in-flight 디스크립터는 intr이 회수하도록 남김).
+- **(반영) `advd` `emit_frame` obuf 오버플로 잠재** — 레코드 1건 최악(~202B)이 안전마진
+  (128B)보다 크고 마무리 `]\n`이 무검사라, proc 64개+큰 tick값이면 `obuf[8192]` 초과 가능.
+  → **레코드 쓰기 전** 256B 여유 확인(최악 레코드+종료자) 후 미달 시 조기 종료(프레임은
+  여전히 유효 JSON으로 닫힘).
+- **(미반영) bridge `heuristic_group` 정수나눗셈** — LLM **폴백** 휴리스틱의 초기 `make -j`
+  오판 가능성(low, 한쪽 uncertain·한쪽 refuted). 데모는 LLM 경로를 쓰고 종료성 강등은
+  의도된 데모 동작(코드 주석에 명시)이라, 임계값 변경은 검증된 동작을 흔들 위험 → 보류.
+- 반영 2건 후 재빌드 → `test_advd.py` E2E PASS·`priority_test` "All tests passed!" 무회귀 재확인.
