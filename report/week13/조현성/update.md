@@ -226,3 +226,52 @@ todo.md가 경고한 핵심 불확실성 = "QEMU `virtio-serial-device`+`virtcon
   오판 가능성(low, 한쪽 uncertain·한쪽 refuted). 데모는 LLM 경로를 쓰고 종료성 강등은
   의도된 데모 동작(코드 주석에 명시)이라, 임계값 변경은 검증된 동작을 흔들 위험 → 보류.
 - 반영 2건 후 재빌드 → `test_advd.py` E2E PASS·`priority_test` "All tests passed!" 무회귀 재확인.
+
+---
+
+## 9. (추가) process_summary.html 주장 ↔ 구현 정합성 감사 + 보강 (2026-05-30)
+
+`process_summary.html`(일반인용 3종 스케줄러 비교)이 LLM 어드바이저로 내건 7개 특징이
+실제 구현됐는지 **7기능 × (코드 위치 확인 → 정확성·재현성 2시각 적대 검증)** 워크플로우로
+감사했다. **결과: 미구현(작동 코드 없음) 0건.** 단 5건은 페이지의 단순화된 설명과 실제
+메커니즘 사이 격차가 있어, **향상 가능한 곳은 코드로 보강하고 구조적 한계는 HTML을 정확히
+(쉬운 톤 유지) 고쳤다.**
+
+### 9.1 코드 보강 (향상 가능 항목)
+- **sec 01/02 — 첫 실행부터 이름 분류** (`proc.c`): 기존엔 학습된 prior가 있어야(2회차부터)
+  이름 분류가 됐다. `name_class_hint()`(빌드툴 make/cc/gcc/ld/build/grind→BATCH) 추가 →
+  `classify_stats`(이름이 행동을 이김)와 `proc_seed_from_prior` cold-start 폴백에 연결.
+  이제 **`cc`가 첫 실행(life=1)부터 BAT·quan=8**로 시드(advisor 없이 `advstat` 실증).
+  `sh`는 **의도적 제외**(모든 자식이 fork로 sh 클래스를 상속 → CPU 작업까지 INTERACTIVE로
+  오염되므로). `sh`는 sleep 행동으로 INTERACTIVE 분류됨. 검증: `spin`은 NRM(중립) 유지,
+  `cc`는 BAT, `priority_test` 무회귀.
+- **sec 05 — 빌드 팀 일괄 정책 자동화** (`advd.c`+`bridge.py`): 종전엔 'build' 판정에 그룹
+  단위 액션이 없고 per-pid `setcls`만 했다. `advd`에 `setjcls <group> <class>`(setjobclass
+  래퍼) 추가, 브리지가 'build' 판정 그룹에 **`setjcls <g> BATCH` 한 번으로 전원 강등**
+  (`--no-demote-builds`로 비활성). 검증: 13-proc 그룹 → `@@OK setjcls group=5 cls=4 procs=13`.
+- **sec 07 — 진단 오프라인 폴백 + 커널 device-optional** (`diagnose.py`+`virtio_console.c`):
+  ① Ollama 불가 시 그냥 죽던 진단을 **규칙 기반 NL 요약**으로 폴백(`--no-llm`). FORKFAIL
+  패턴을 "job cap 동작(메모리부족 아님)"으로 정확 요약. ② **(중요 회귀 수정)** `virtio_console_init`이
+  디바이스 부재 시 **panic**하던 것을 발견(diagnose.py가 전용 디바이스 없이 부팅) → 채널을
+  best-effort로: 디바이스 없으면 경고 후 부팅 계속, `/advisor` read/write는 `vcon_ready`
+  가드로 -1 반환. 모든 적대 리뷰 하니스가 디바이스를 포함해 놓쳤던 결함.
+
+### 9.2 HTML 정확화 (구조적 한계 — 쉬운 톤 유지)
+- **01/02**: "이름만 보고 즉시"가 빌드툴엔 첫 실행부터 참 → 유지하되, **"처음 보는 이름은 한 번
+  겪고 기억(→04)"** 단서 추가.
+- **03**: 내부 모순 수정(§1·§2는 cc→BATCH인데 §3 SVG는 "cc=4") → 계산용 예시를 `spin`(순수
+  CPU)으로, 빌드 예시를 `make`로 교체. "프로세스별 최적값 추론"→"**성격(등급)에 맞는 시간**".
+- **04**: 정확. **재부팅 후에도 기억 이어짐**(실구현 강점)을 한 줄 추가.
+- **05**: "트리 모양 자동 인식"→"**핏줄은 fork로 자동 한 팀**, 빌드 여부는 **이름·규모·활동**으로",
+  "팀 전원 한 번에 강등"은 9.1로 실현되어 유지.
+- **06**: "트리 모양"→"**이름·숫자·활동량**", "강등/격리"→"**우선순위 강등(throttle)**".
+- **07**: "시계열"→"**핵심 사건 타임라인**(전체 메모리 덤프 아님)", "AI 진단"→"**로컬 AI, 없으면
+  규칙 기반 요약**".
+
+### 9.3 검증·요약
+- 클린 재빌드 0 에러, `priority_test` "All tests passed!" 무회귀, `test_advd.py` E2E PASS,
+  `cc`→BAT(첫 실행)·`setjcls` 전원 강등·`diagnose --no-llm` 오프라인 진단·device-absent 부팅
+  각각 실증.
+- 감사 최종: 7기능 모두 실동작(미구현 0). 코드 보강 3건(01/02·05·07) + 커널 robustness 1건,
+  HTML 7개 섹션 정확화. 남은 한계는 "커널 내 진짜 LLM 의미이해 불가(호스트 LLM·행동 기반)"
+  등 아키텍처 본질 — HTML에 쉬운 말로 반영.
