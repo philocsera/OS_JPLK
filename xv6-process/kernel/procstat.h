@@ -42,12 +42,31 @@ struct procstat {
   int priority;       // 0=highest .. 20=lowest (xv6 convention)
   int class_id;       // CLASS_*
   int quantum_ticks;  // dispatcher slice length advisor recommends
+  int group_id;       // job/process-group id (report sec 05)
   uint64 ready_ticks; // ticks spent in RUNNABLE since allocproc
   uint64 run_ticks;   // ticks spent in RUNNING since allocproc
   uint64 sleep_ticks; // ticks spent in SLEEPING since allocproc
   uint64 ctxsw_count; // total context switches into this proc
   uint64 lifetime;    // ticks since allocproc (ready+run+sleep+used)
   char name[16];      // process name (set by exec)
+};
+
+// ---------------------------------------------------------------------------
+// Exit-statistics learning (report sec 04). When a process exits, the kernel
+// folds its run/sleep profile into a per-NAME prior. The next process that
+// exec()s the same name is seeded with the learned class at its very first
+// instant — no "misclassified warm-up window". This is the kernel-resident
+// minimum needed because short-lived procs die between advisord poll cycles;
+// the *policy* (how to classify) still mirrors the userspace advisor.
+#define NPRIOR 16             // distinct program names remembered
+
+struct nameprior {
+  char   name[16];
+  int    valid;               // 0 until first exit contributes
+  int    class_id;            // learned CLASS_* for this name
+  uint64 samples;             // number of exits folded in
+  uint64 avg_run;             // running mean of run_ticks
+  uint64 avg_sleep;           // running mean of sleep_ticks
 };
 
 #endif // _PROCSTAT_H_

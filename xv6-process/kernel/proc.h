@@ -115,6 +115,10 @@ struct proc {
   int class_id;                // classification (CLASS_*), default CLASS_NORMAL
   int quantum_ticks;           // dispatcher slice length, default 1 (= legacy)
   int slice_used;              // ticks consumed in the current dispatch
+  int group_id;                // job/process-group id (report sec 05). Inherited
+                               // on fork; a process becomes a new job leader via
+                               // setjob() (group_id := its own pid). Lets policy
+                               // be applied to a whole sh->make->cc tree at once.
 
   // procstat counters (driven by clockintr in trap.c).
   uint64 ready_ticks;

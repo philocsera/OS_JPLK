@@ -41,6 +41,36 @@ extern char trampoline[]; // trampoline.S
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
 
+// Exit-statistics learning table (report sec 04). Keyed by program name;
+// updated by proc_learn_on_exit() and read by proc_seed_from_prior() /
+// the getnamepriors syscall. Guarded by its own lock so it never sits on
+// the scheduler's or wait_lock's critical path.
+struct spinlock prior_lock;
+struct nameprior name_priors[NPRIOR];
+
+// ----- Event ring for panic post-mortem (report sec 07) -----
+// A tiny circular log of notable scheduler/lifecycle events. On panic() the
+// kernel dumps it as a @@PANIC/@@EV timeline that a host LLM (tools/diagnose.py)
+// turns into a natural-language diagnosis. Best-effort: the dump runs lockless
+// so a panic with a held lock still prints.
+#define NEVENT 32
+#define EV_NOTE     0   // userspace breadcrumb (note syscall)
+#define EV_EXIT     1   // process exited (detail = run, sleep)
+#define EV_FORKFAIL 2   // fork denied (detail = group_id, group count)
+#define EV_CLASS    3   // class changed (detail = old, new)
+struct kevent {
+  uint64 tick;
+  int type;
+  int pid;
+  char name[16];
+  uint64 d1, d2;
+  char msg[24];
+};
+static struct kevent evbuf[NEVENT];
+static int evhead;            // next slot to write
+static int evcount;           // total events ever logged
+static struct spinlock ev_lock;
+
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
 // guard page.
@@ -66,6 +96,8 @@ procinit(void)
   
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
+  initlock(&prior_lock, "nameprior");
+  initlock(&ev_lock, "kevent");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->state = UNUSED;
@@ -169,6 +201,10 @@ found:
   p->class_id = CLASS_NORMAL;
   p->quantum_ticks = class_default_quantum[CLASS_NORMAL];
   p->slice_used = 0;
+  // Default: each proc is its own job (group_id == pid). fork() overrides
+  // this with the parent's group so a subtree shares one job id; setjob()
+  // lets a proc deliberately start a fresh job. (report sec 05)
+  p->group_id = p->pid;
   p->ready_ticks = 0;
   p->run_ticks = 0;
   p->sleep_ticks = 0;
@@ -304,6 +340,20 @@ kfork(void)
   struct proc *np;
   struct proc *p = myproc();
 
+  // Fork-bomb cap (report sec 06): a child inherits the parent's job/group,
+  // so a runaway tree all shares one group_id. Refuse to grow a single job
+  // past GROUP_PROC_LIMIT live procs — the bomb caps itself while other jobs
+  // (the shell, init, advisord) keep their slots. A legitimate large job can
+  // still scale by calling setjob() in its branches. init (group 1) is exempt
+  // so the system can always reparent orphans.
+  if(p->group_id != 1){
+    int gc = proc_group_count(p->group_id);
+    if(gc >= GROUP_PROC_LIMIT){
+      proc_log_event(EV_FORKFAIL, p->pid, p->name, p->group_id, gc, "cap");
+      return -1;
+    }
+  }
+
   // Allocate process.
   if((np = allocproc()) == 0){
     return -1;
@@ -337,6 +387,9 @@ kfork(void)
   np->priority = p->priority;
   np->class_id = p->class_id;
   np->quantum_ticks = p->quantum_ticks;
+  // Inherit the job/group so a whole sh->make->cc tree shares one id
+  // (report sec 05). Overrides the allocproc default of group_id==pid.
+  np->group_id = p->group_id;
 
   pid = np->pid;
 
@@ -378,6 +431,12 @@ kexit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  // Fold this run's profile into the per-name prior before we tear the
+  // process down, so the next exec() of this name starts pre-classified.
+  proc_learn_on_exit(p);
+  // Record the exit in the panic post-mortem ring (sec 07).
+  proc_log_event(EV_EXIT, p->pid, p->name, p->run_ticks, p->sleep_ticks, 0);
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
@@ -772,6 +831,7 @@ procstat_get(int pid, struct procstat *out)
       out->priority = p->priority;
       out->class_id = p->class_id;
       out->quantum_ticks = p->quantum_ticks;
+      out->group_id = p->group_id;
       out->ready_ticks = p->ready_ticks;
       out->run_ticks = p->run_ticks;
       out->sleep_ticks = p->sleep_ticks;
@@ -811,6 +871,7 @@ procstat_all_range(int start, int end, struct procstat *dst, int dst_cap)
       dst[n].priority = p->priority;
       dst[n].class_id = p->class_id;
       dst[n].quantum_ticks = p->quantum_ticks;
+      dst[n].group_id = p->group_id;
       dst[n].ready_ticks = p->ready_ticks;
       dst[n].run_ticks = p->run_ticks;
       dst[n].sleep_ticks = p->sleep_ticks;
@@ -838,11 +899,20 @@ proc_setclass(int pid, int class_id)
   for(p = proc; p < &proc[NPROC]; p++) {
     acquire(&p->lock);
     if(p->pid == pid && p->state != UNUSED) {
+      int old = p->class_id;
       p->class_id = class_id;
       // class change auto-updates the recommended quantum, but the
       // advisor can override via setquantum afterward.
       p->quantum_ticks = class_default_quantum[class_id];
+      char nm[16];
+      safestrcpy(nm, p->name, sizeof(nm));
       release(&p->lock);
+      // Record the advisor's decision in the event ring so it shows up in
+      // the sec-07 @@PANIC timeline. Logged outside p->lock (order is always
+      // p->lock -> ev_lock; eventlog never takes p->lock). Only on a real
+      // change, to avoid flooding the 32-slot ring with no-op rewrites.
+      if(old != class_id)
+        proc_log_event(EV_CLASS, pid, nm, old, class_id, "set");
       return 0;
     }
     release(&p->lock);
@@ -866,6 +936,358 @@ proc_setquantum(int pid, int q)
     release(&p->lock);
   }
   return -1;
+}
+
+// ===========================================================================
+// Exit-statistics learning (report sec 04).
+//
+// Policy mirrors the userspace advisor's classify(): sleep-heavy → IO/INT,
+// run-heavy → CPU_BOUND, else NORMAL. Kept in the kernel only so that
+// short-lived processes (which die between advisord polls) still contribute
+// a sample and seed their successors. prior_lock guards the table; it is
+// never held across a context switch.
+// ===========================================================================
+
+// A small built-in "name -> class" hint for well-known BUILD-TOOL names, so a
+// recognizable build program is classified BATCH by its NAME from instruction
+// zero — even on its very first run, before any behavior is observed (sec 01).
+// Cold-start default only: a learned prior (proc_learn_on_exit) and the advisor
+// always override it. Build tools are BATCH even when their CPU profile looks
+// like a generic spinner — that "name beats behavior" is the whole point of the
+// name-based advisor. Returns a CLASS_* id, or -1 if the name is unknown.
+//
+// Deliberately NOT including "sh": sh is the parent of every user process, so
+// seeding it would leak its class into all children via fork inheritance,
+// biasing fresh CPU-bound commands. sh is correctly classified INTERACTIVE from
+// its sleep behavior (classify_stats) instead.
+static int
+name_class_hint(const char *name)
+{
+  static const struct { const char *name; int class; } hints[] = {
+    { "make",  CLASS_BATCH },       { "cc",    CLASS_BATCH },
+    { "gcc",   CLASS_BATCH },       { "ld",    CLASS_BATCH },
+    { "build", CLASS_BATCH },       { "grind", CLASS_BATCH },
+  };
+  for(int i = 0; i < NELEM(hints); i++)
+    if(strncmp(name, hints[i].name, 16) == 0)
+      return hints[i].class;
+  return -1;
+}
+
+static int
+classify_stats(uint64 run, uint64 sleep, const char *name)
+{
+  // A recognizable name wins over behavior (sec 01): e.g. cc/make are BATCH
+  // build tools even though their CPU profile looks like a generic spinner.
+  int hint = name_class_hint(name);
+  if(hint >= 0)
+    return hint;
+
+  uint64 active = run + sleep;
+  if(active == 0)
+    return CLASS_NORMAL;
+  if(sleep * 2 > active) {
+    if(strncmp(name, "sh", 16) == 0)
+      return CLASS_INTERACTIVE;
+    return CLASS_IO_BOUND;
+  }
+  if(run * 4 > active)
+    return CLASS_CPU_BOUND;
+  return CLASS_NORMAL;
+}
+
+// Find the prior entry for name, or claim a free/evictable slot. Caller
+// holds prior_lock. Returns 0 only if the table is full of distinct,
+// already-sampled names and none match.
+static struct nameprior *
+prior_slot(const char *name)
+{
+  struct nameprior *e, *free_slot = 0, *lru = 0;
+  for(e = name_priors; e < &name_priors[NPRIOR]; e++) {
+    if(e->valid && strncmp(e->name, name, 16) == 0)
+      return e;                         // existing entry for this name
+    if(!e->valid && free_slot == 0)
+      free_slot = e;                    // first empty slot
+    if(e->valid && (lru == 0 || e->samples < lru->samples))
+      lru = e;                          // fewest-sample entry, for eviction
+  }
+  if(free_slot)
+    return free_slot;
+  // Table full: evict the least-sampled name so a busy name can't be
+  // starved out by a one-shot. (NPRIOR is small; this keeps it bounded.)
+  if(lru) {
+    lru->valid = 0;
+    lru->samples = 0;
+    lru->avg_run = lru->avg_sleep = 0;
+  }
+  return lru;
+}
+
+// Fold an exiting process's profile into the per-name prior. Called from
+// kexit() while the proc is still the running process (its counters are
+// stable enough — accounting is statistical).
+void
+proc_learn_on_exit(struct proc *p)
+{
+  uint64 run = p->run_ticks, slp = p->sleep_ticks;
+  // Ignore processes too short-lived to carry signal — avoids polluting
+  // the prior with noise from instantly-exiting helpers.
+  if(run + slp < 2)
+    return;
+
+  acquire(&prior_lock);
+  struct nameprior *e = prior_slot(p->name);
+  if(e) {
+    // Running mean so repeated runs converge instead of last-write-wins.
+    e->avg_run   = (e->avg_run   * e->samples + run) / (e->samples + 1);
+    e->avg_sleep = (e->avg_sleep * e->samples + slp) / (e->samples + 1);
+    e->samples++;
+    e->class_id  = classify_stats(e->avg_run, e->avg_sleep, p->name);
+    safestrcpy(e->name, p->name, sizeof(e->name));
+    e->valid = 1;
+  }
+  release(&prior_lock);
+}
+
+// Seed a freshly-exec'd process from the learned prior for its name, so it
+// runs under the right class from instruction zero. Called at the end of
+// exec() (p is the current process). No-op if the name has no prior yet —
+// the process keeps the class it inherited via fork (legacy behavior).
+void
+proc_seed_from_prior(struct proc *p)
+{
+  int seeded = 0;
+  acquire(&prior_lock);
+  for(struct nameprior *e = name_priors; e < &name_priors[NPRIOR]; e++) {
+    if(e->valid && e->samples >= 1 && strncmp(e->name, p->name, 16) == 0) {
+      p->class_id = e->class_id;
+      p->quantum_ticks = class_default_quantum[e->class_id];
+      seeded = 1;
+      break;
+    }
+  }
+  release(&prior_lock);
+
+  // No learned prior yet (first run of this name): fall back to the built-in
+  // name hint so a known program (make/cc/.../sh) is still classified by NAME
+  // from instruction zero (sec 01/02). Once this name has actually run and
+  // exited, the learned prior above takes over on later runs.
+  if(!seeded) {
+    int hint = name_class_hint(p->name);
+    if(hint >= 0) {
+      p->class_id = hint;
+      p->quantum_ticks = class_default_quantum[hint];
+    }
+  }
+}
+
+// Copy the prior table into a user buffer for inspection/testing.
+// Returns the number of valid entries written.
+int
+proc_get_priors(struct nameprior *dst, int max)
+{
+  int n = 0;
+  acquire(&prior_lock);
+  for(struct nameprior *e = name_priors; e < &name_priors[NPRIOR] && n < max; e++) {
+    if(e->valid)
+      dst[n++] = *e;
+  }
+  release(&prior_lock);
+  return n;
+}
+
+// Install a userspace-supplied prior table (report sec 04 persistence). The
+// kernel table is reboot-volatile, so `priors save` dumps it to a file before
+// reboot and `priors load` (run from init at boot) restores it through here.
+// Every entry is re-validated — userspace data is untrusted — and the live
+// table is fully replaced. Returns the number of entries installed.
+int
+proc_set_priors(struct nameprior *src, int n)
+{
+  if(n < 0)
+    n = 0;
+  if(n > NPRIOR)
+    n = NPRIOR;
+  acquire(&prior_lock);
+  for(int i = 0; i < NPRIOR; i++)        // clear, then compact valid entries in
+    name_priors[i].valid = 0;
+  int installed = 0;
+  for(int i = 0; i < n; i++) {
+    struct nameprior *s = &src[i];
+    if(!s->valid || s->name[0] == '\0')
+      continue;
+    if(s->class_id < 0 || s->class_id >= NCLASS)
+      continue;
+    struct nameprior *e = &name_priors[installed];
+    safestrcpy(e->name, s->name, sizeof(e->name));  // bounds + NUL-terminates
+    e->valid     = 1;
+    e->class_id  = s->class_id;
+    e->samples   = s->samples ? s->samples : 1;  // >=1 so seeding is eligible
+    e->avg_run   = s->avg_run;
+    e->avg_sleep = s->avg_sleep;
+    installed++;
+  }
+  release(&prior_lock);
+  return installed;
+}
+
+// ===========================================================================
+// Job / process-tree grouping (report sec 05).
+//
+// group_id ties a sh->make->cc tree together: it propagates on fork and is
+// reset by setjob(). The point is that policy (priority/class) can then be
+// applied to a whole job in one call, instead of poking each pid. The kernel
+// only provides the grouping primitive; *which* trees form a job and what
+// policy to apply is the advisor's (userspace) decision.
+// ===========================================================================
+
+// Make the caller the leader of a fresh job: group_id := its own pid.
+// Descendants forked afterwards inherit this id. Returns the new group id.
+int
+proc_setjob(void)
+{
+  struct proc *p = myproc();
+  acquire(&p->lock);
+  p->group_id = p->pid;
+  int g = p->group_id;
+  release(&p->lock);
+  return g;
+}
+
+// Return the group_id of pid (pid <= 0 means the caller). -1 if not found.
+int
+proc_getjob(int pid)
+{
+  if(pid <= 0)
+    return myproc()->group_id;
+  struct proc *p;
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->pid == pid && p->state != UNUSED) {
+      int g = p->group_id;
+      release(&p->lock);
+      return g;
+    }
+    release(&p->lock);
+  }
+  return -1;
+}
+
+// Apply a priority to every member of a job in one sweep. Returns the number
+// of processes updated, or -1 on a bad priority.
+int
+proc_setjobpriority(int group_id, int priority)
+{
+  if(priority < 0 || priority > 20)
+    return -1;
+  int count = 0;
+  struct proc *p;
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->state != UNUSED && p->group_id == group_id) {
+      p->priority = priority;
+      count++;
+    }
+    release(&p->lock);
+  }
+  return count;
+}
+
+// Count live processes in a job/group. Used by the fork-bomb cap (sec 06)
+// and exposed for the advisor to spot a runaway tree.
+int
+proc_group_count(int group_id)
+{
+  int count = 0;
+  struct proc *p;
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->state != UNUSED && p->group_id == group_id)
+      count++;
+    release(&p->lock);
+  }
+  return count;
+}
+
+// Append an event to the ring (report sec 07). msg may be 0.
+void
+proc_log_event(int type, int pid, const char *name, uint64 d1, uint64 d2,
+               const char *msg)
+{
+  acquire(&ev_lock);
+  struct kevent *e = &evbuf[evhead];
+  e->tick = ticks;
+  e->type = type;
+  e->pid = pid;
+  e->d1 = d1;
+  e->d2 = d2;
+  safestrcpy(e->name, name ? name : "", sizeof(e->name));
+  safestrcpy(e->msg, msg ? msg : "", sizeof(e->msg));
+  evhead = (evhead + 1) % NEVENT;
+  evcount++;
+  release(&ev_lock);
+}
+
+static const char *
+ev_type_name(int t)
+{
+  switch(t) {
+  case EV_NOTE:     return "NOTE";
+  case EV_EXIT:     return "EXIT";
+  case EV_FORKFAIL: return "FORKFAIL";
+  case EV_CLASS:    return "CLASS";
+  default:          return "?";
+  }
+}
+
+// Dump the event ring as a @@PANIC/@@EV timeline. Called from panic() — runs
+// WITHOUT taking ev_lock so a panic while the lock is held still prints.
+void
+eventlog_dump(const char *reason)
+{
+  int n = evcount < NEVENT ? evcount : NEVENT;
+  int start = evcount < NEVENT ? 0 : evhead;  // oldest first
+  printf("@@PANIC reason=\"%s\" tick=%d events=%d\n",
+         reason ? reason : "", ticks, n);
+  for(int i = 0; i < n; i++) {
+    struct kevent *e = &evbuf[(start + i) % NEVENT];
+    printf("@@EV tick=%ld type=%s pid=%d name=%s d1=%ld d2=%ld msg=%s\n",
+           e->tick, ev_type_name(e->type), e->pid, e->name,
+           e->d1, e->d2, e->msg);
+  }
+  printf("@@PANIC_END\n");
+}
+
+// Apply a class (and its recommended quantum) to every member of a job.
+// Returns the number of processes updated, or -1 on a bad class.
+int
+proc_setjobclass(int group_id, int class_id)
+{
+  if(class_id < 0 || class_id >= NCLASS)
+    return -1;
+  int count = 0;
+  struct proc *p;
+  for(p = proc; p < &proc[NPROC]; p++) {
+    int old = -1, pid = -1, matched = 0;
+    char nm[16];
+    acquire(&p->lock);
+    if(p->state != UNUSED && p->group_id == group_id) {
+      old = p->class_id;
+      p->class_id = class_id;
+      p->quantum_ticks = class_default_quantum[class_id];
+      pid = p->pid;
+      safestrcpy(nm, p->name, sizeof(nm));
+      matched = 1;
+    }
+    release(&p->lock);
+    if(matched) {
+      // See proc_setclass: log the whole-job decision outside p->lock.
+      if(old != class_id)
+        proc_log_event(EV_CLASS, pid, nm, old, class_id, "job");
+      count++;
+    }
+  }
+  return count;
 }
 
 // Print a process listing to console.  For debugging.

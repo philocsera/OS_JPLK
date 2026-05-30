@@ -91,7 +91,9 @@ class_name(int class_id)
 int
 main(int argc, char *argv[])
 {
-  struct procstat buf[MAX_PROCS];
+  // ~5.5KB (88 B * 64) — must be static, not on the 1-page user stack,
+  // or the first write faults (scause 0xf, store page fault).
+  static struct procstat buf[MAX_PROCS];
   int verbose = (argc > 1 && strcmp(argv[1], "-v") == 0);
   int my_pid = getpid();
 

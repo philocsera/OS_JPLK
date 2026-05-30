@@ -126,7 +126,11 @@ kexec(char *path, char **argv)
     if(*s == '/')
       last = s+1;
   safestrcpy(p->name, last, sizeof(p->name));
-    
+
+  // Seed class/quantum from what we learned the last time a process of this
+  // name exited (report sec 04). No-op until a prior exists.
+  proc_seed_from_prior(p);
+
   // Commit to the user image.
   oldpagetable = p->pagetable;
   p->pagetable = pagetable;

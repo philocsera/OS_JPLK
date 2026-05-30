@@ -32,6 +32,17 @@ int setclass(int pid, int class_id);
 int setquantum(int pid, int q);
 int getprocstat(int pid, struct procstat *out);
 int getprocstat_all(struct procstat *arr, int max);
+struct nameprior;
+int getnamepriors(struct nameprior *arr, int max);
+int setnamepriors(struct nameprior *arr, int n);
+// job / process-tree grouping — see kernel/procstat.h sec 05
+int setjob(void);
+int getjob(int pid);
+int setjobpriority(int group_id, int priority);
+int setjobclass(int group_id, int class_id);
+// panic post-mortem — see kernel/proc.c sec 07
+int note(const char *msg);
+int crash(const char *msg);
 
 // ulib.c
 int stat(const char*, struct stat*);

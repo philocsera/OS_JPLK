@@ -45,6 +45,11 @@
 #define VIRTIO_RING_F_INDIRECT_DESC 28
 #define VIRTIO_RING_F_EVENT_IDX     29
 
+// virtio-console feature bits (Section 5.3 of the spec)
+#define VIRTIO_CONSOLE_F_SIZE        0  /* console size config available */
+#define VIRTIO_CONSOLE_F_MULTIPORT   1  /* multiple ports + control queue */
+#define VIRTIO_CONSOLE_F_EMERG_WRITE 2  /* emergency write config available */
+
 // this many virtio descriptors.
 // must be a power of two.
 #define NUM 8
