@@ -385,10 +385,10 @@
             </svg>
           </div>
           <div class="txt">
-            <b>“이름표를 먼저 봅니다.”</b><br>
-            요리사가 들어오기 전에 <em class="em-l">이름표(예: make, sh, cc)</em>를 미리 보고
-            “얘는 빌드용이군, 얘는 대화용이군” 하고 <b>분류부터</b> 합니다.
-            현대 OS는 ‘일해본 다음에’ 판단하지만, 이쪽은 <b>일하기 전부터</b> 안다는 게 차이예요.
+            <b>”이름표를 먼저 봅니다.”</b><br>
+            <em class="em-l">make·cc</em> 처럼 <b>잘 알려진 빌드 도구</b>는 들어오는 순간 이름만 보고
+            — 한 번도 일을 안 시켜봤어도 — <b>곧바로 ‘대량작업(BATCH)’</b>으로 분류합니다.
+            <b>처음 보는 이름</b>은 한 번 겪어 본 뒤 그 버릇을 기억해, 다음부터는 첫 순간에 알아봐요(→ 04).
           </div>
         </div>
       </div>
@@ -492,9 +492,10 @@
             </svg>
           </div>
           <div class="txt">
-            <b>“이름을 보자마자 분류.”</b><br>
-            자식이 <em class="em-l">exec()</em>로 “나 이제부터 make 할 거야!” 라고 선언하는 순간,
-            매니저는 그 이름만 보고 <b>즉시</b> BATCH로 분류합니다. 잘못 분류된 구간이 거의 없어요.
+            <b>”이름을 보자마자 분류.”</b><br>
+            자식이 <em class="em-l">exec()</em>로 “나 이제부터 make 할 거야!” 선언하는 순간,
+            매니저는 그 이름만 보고 <b>그 자리에서 BATCH</b>로 분류합니다 — 첫 실행이라도요.
+            처음 보는 이름이면 잠깐 부모를 따라가다, 한 번 끝나면 버릇을 학습해 다음부턴 즉시 맞춥니다.
           </div>
         </div>
       </div>
@@ -589,18 +590,18 @@
               <g font-family="IBM Plex Mono" font-size="10">
                 <text x="20" y="55" fill="#ff7eb6">sh</text>
                 <rect x="48" y="44" width="14" height="18" fill="#ff7eb6"/><text x="68" y="58" fill="#8597ad" font-size="9">1 (즉응)</text>
-                <text x="20" y="95" fill="#7196b1">cc</text>
+                <text x="20" y="95" fill="#7196b1">spin</text>
                 <rect x="48" y="84" width="56" height="18" fill="#7196b1"/><text x="110" y="98" fill="#8597ad" font-size="9">4 (계산용)</text>
-                <text x="20" y="135" fill="#5d7a93">build</text>
+                <text x="20" y="135" fill="#5d7a93">make</text>
                 <rect x="48" y="124" width="112" height="18" fill="#5d7a93"/><text x="166" y="138" fill="#8597ad" font-size="9">8 (대량작업)</text>
               </g>
               <text x="140" y="172" text-anchor="middle" fill="#5af78e" font-family="IBM Plex Mono" font-size="9">각 프로세스 성격에 맞춰서</text>
             </svg>
           </div>
           <div class="txt">
-            <b>“너에게 맞는 시간.”</b><br>
-            대화형(sh)은 <em class="em-l">1틱</em>으로 짧게, 계산형(cc)은 <em class="em-l">4틱</em>,
-            대량 빌드는 <em class="em-l">8틱</em>. <b>프로세스별로 최적값</b>을 추론해서 추천합니다.
+            <b>”성격에 맞는 시간.”</b><br>
+            대화형(sh)은 <em class="em-l">1틱</em>으로 짧게, 순수 계산형(spin)은 <em class="em-l">4틱</em>,
+            대량 빌드(make·cc)는 <em class="em-l">8틱</em>. 프로세스의 <b>성격(등급)을 정해주면 그에 맞는 시간</b>이 따라붙어요.
           </div>
         </div>
       </div>
@@ -703,9 +704,10 @@
             </svg>
           </div>
           <div class="txt">
-            <b>“기록을 학습합니다.”</b><br>
-            프로세스가 끝나기 직전 <em class="em-l">‘이 이름의 프로그램은 평균 이랬다’</em>를 저장.
-            다음에 <b>같은 이름의 프로그램이 또 실행될 때</b>, 그 경험으로 첫 순간부터 잘 분류합니다.
+            <b>”기록을 학습합니다.”</b><br>
+            프로세스가 끝나기 직전 <em class="em-l">’이 이름의 프로그램은 평균 이랬다’</em>(얼마나 계산하고 얼마나 쉬었는지)를 저장.
+            다음에 <b>같은 이름</b>이 또 실행되면 그 경험으로 첫 순간부터 분류하고,
+            <b>재부팅을 해도</b> 그 기억은 파일로 남아 그대로 이어집니다.
           </div>
         </div>
       </div>
@@ -804,9 +806,10 @@
             </svg>
           </div>
           <div class="txt">
-            <b>“이름과 트리 모양으로 자동 인식.”</b><br>
-            <em class="em-l">sh → make → cc</em> 라는 흐름을 보면 “아, 이거 빌드구나” 하고 <b>매니저가 알아서</b> 묶습니다.
-            그리고 팀 전체에 “너희는 백그라운드 빌드 팀이니까 우선순위 낮춤” 식의 정책을 일괄 적용해요.
+            <b>”같은 핏줄은 한 팀으로.”</b><br>
+            <em class="em-l">sh → make → cc</em> 처럼 한 프로그램이 낳은 자식·손자는 <b>자동으로 한 팀(그룹)</b>이 됩니다.
+            매니저는 팀의 <b>이름·규모·활동</b>을 보고 “이건 빌드 팀”이라 판단하면,
+            팀 <b>전원을 한 번의 명령으로</b> 백그라운드 등급(BATCH)으로 내려요.
           </div>
         </div>
       </div>
@@ -927,13 +930,14 @@
                 <circle cx="235" cy="105" r="6" fill="rgba(255,176,0,.1)" stroke="#ffb000"/>
                 <text x="200" y="135" text-anchor="middle" fill="#ffb000" font-family="IBM Plex Mono" font-size="9">⚠ 폭주 패턴</text>
               </g>
-              <text x="140" y="165" text-anchor="middle" fill="#5af78e" font-family="IBM Plex Mono" font-size="9">→ 의심스러우면 미리 강등/격리</text>
+              <text x="140" y="165" text-anchor="middle" fill="#5af78e" font-family="IBM Plex Mono" font-size="9">→ 의심스러우면 미리 우선순위 강등</text>
             </svg>
           </div>
           <div class="txt">
-            <b>“모양을 보고 판단합니다.”</b><br>
-            정상적인 빌드 트리와 폭주하는 복제 트리는 <em class="em-l">모양이 다릅니다</em>.
-            매니저는 <b>이름과 트리 모양</b>으로 “이건 의심스럽다”를 감지하고 미리 조치할 수 있어요.
+            <b>”낌새를 보고 판단합니다.”</b><br>
+            정상 빌드 팀과 폭주하는 복제 떼는 <em class="em-l">이름·숫자·활동량</em>이 다릅니다 —
+            빌드는 몇 안 되는 도구가 진짜 일을 하고, 폭탄은 똑같은 이름이 우르르 생겨 거의 놀아요.
+            매니저는 그 낌새로 “의심스럽다”를 감지해 <b>미리 우선순위를 확 낮춰</b> 묶어둡니다.
           </div>
         </div>
       </div>
@@ -1025,10 +1029,10 @@
             </svg>
           </div>
           <div class="txt">
-            <b>“사람말로 설명합니다.”</b><br>
-            시스템이 죽기 전 일어난 일을 <em class="em-l">시계열</em>로 보고,
-            <b>“이 프로그램이 이때부터 이렇게 비정상이었어요”</b>라고 자연어로 진단합니다.
-            (단, 결정은 사람이 — AI는 제안만)
+            <b>”사람말로 설명합니다.”</b><br>
+            죽기 직전의 <em class="em-l">핵심 사건들</em>(누가 종료했고, 누가 fork를 폭주시켰는지)을 시간순으로 모아,
+            <b>”이 프로그램이 이때부터 이렇게 비정상이었어요”</b>라고 풀어 설명합니다.
+            로컬 AI가 맡되, AI가 없으면 규칙 기반 요약으로 대신해요. (결정은 사람이 — AI는 제안만)
           </div>
         </div>
       </div>
