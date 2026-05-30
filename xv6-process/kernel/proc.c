@@ -948,9 +948,41 @@ proc_setquantum(int pid, int q)
 // never held across a context switch.
 // ===========================================================================
 
+// A small built-in "name -> class" hint for well-known BUILD-TOOL names, so a
+// recognizable build program is classified BATCH by its NAME from instruction
+// zero — even on its very first run, before any behavior is observed (sec 01).
+// Cold-start default only: a learned prior (proc_learn_on_exit) and the advisor
+// always override it. Build tools are BATCH even when their CPU profile looks
+// like a generic spinner — that "name beats behavior" is the whole point of the
+// name-based advisor. Returns a CLASS_* id, or -1 if the name is unknown.
+//
+// Deliberately NOT including "sh": sh is the parent of every user process, so
+// seeding it would leak its class into all children via fork inheritance,
+// biasing fresh CPU-bound commands. sh is correctly classified INTERACTIVE from
+// its sleep behavior (classify_stats) instead.
+static int
+name_class_hint(const char *name)
+{
+  static const struct { const char *name; int class; } hints[] = {
+    { "make",  CLASS_BATCH },       { "cc",    CLASS_BATCH },
+    { "gcc",   CLASS_BATCH },       { "ld",    CLASS_BATCH },
+    { "build", CLASS_BATCH },       { "grind", CLASS_BATCH },
+  };
+  for(int i = 0; i < NELEM(hints); i++)
+    if(strncmp(name, hints[i].name, 16) == 0)
+      return hints[i].class;
+  return -1;
+}
+
 static int
 classify_stats(uint64 run, uint64 sleep, const char *name)
 {
+  // A recognizable name wins over behavior (sec 01): e.g. cc/make are BATCH
+  // build tools even though their CPU profile looks like a generic spinner.
+  int hint = name_class_hint(name);
+  if(hint >= 0)
+    return hint;
+
   uint64 active = run + sleep;
   if(active == 0)
     return CLASS_NORMAL;
@@ -1024,15 +1056,29 @@ proc_learn_on_exit(struct proc *p)
 void
 proc_seed_from_prior(struct proc *p)
 {
+  int seeded = 0;
   acquire(&prior_lock);
   for(struct nameprior *e = name_priors; e < &name_priors[NPRIOR]; e++) {
     if(e->valid && e->samples >= 1 && strncmp(e->name, p->name, 16) == 0) {
       p->class_id = e->class_id;
       p->quantum_ticks = class_default_quantum[e->class_id];
+      seeded = 1;
       break;
     }
   }
   release(&prior_lock);
+
+  // No learned prior yet (first run of this name): fall back to the built-in
+  // name hint so a known program (make/cc/.../sh) is still classified by NAME
+  // from instruction zero (sec 01/02). Once this name has actually run and
+  // exited, the learned prior above takes over on later runs.
+  if(!seeded) {
+    int hint = name_class_hint(p->name);
+    if(hint >= 0) {
+      p->class_id = hint;
+      p->quantum_ticks = class_default_quantum[hint];
+    }
+  }
 }
 
 // Copy the prior table into a user buffer for inspection/testing.
