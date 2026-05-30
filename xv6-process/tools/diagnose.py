@@ -168,7 +168,8 @@ def heuristic_diagnose(timeline):
     return " ".join(parts)
 
 
-def diagnose(timeline, model, host, timeout):
+def diagnose(timeline, model, host, timeout,
+             num_ctx=2048, num_predict=400, keep_alive="10m"):
     body = json.dumps({
         "model": model,
         "messages": [
@@ -178,7 +179,12 @@ def diagnose(timeline, model, host, timeout):
             {"role": "user", "content": timeline},
         ],
         "stream": False,
-        "options": {"temperature": 0.2},
+        # Latency tuning (report §10): bounded ctx + output cap + keep_alive.
+        # num_predict is larger here than the bridge — this writes a 3-5
+        # sentence narrative, not a one-line JSON label.
+        "keep_alive": keep_alive,
+        "options": {"temperature": 0.2, "num_ctx": num_ctx,
+                    "num_predict": num_predict},
     }).encode()
     req = urllib.request.Request(
         f"http://{host}/api/chat", data=body,
@@ -200,6 +206,12 @@ def main():
                                       "booting QEMU")
     ap.add_argument("--no-llm", action="store_true",
                     help="skip the LLM; use the offline heuristic diagnosis")
+    ap.add_argument("--num-ctx", type=int, default=2048,
+                    help="LLM context window (report §10 latency tuning)")
+    ap.add_argument("--num-predict", type=int, default=400,
+                    help="cap LLM output tokens for the narrative")
+    ap.add_argument("--keep-alive", default="10m",
+                    help="keep the model resident between calls")
     args = ap.parse_args()
 
     if args.logfile:
@@ -216,7 +228,8 @@ def main():
     diag, src = None, None
     if not args.no_llm:
         try:
-            diag = diagnose(timeline, args.model, args.ollama_host, args.timeout)
+            diag = diagnose(timeline, args.model, args.ollama_host, args.timeout,
+                            args.num_ctx, args.num_predict, args.keep_alive)
             src = f"LLM {args.model}"
         except Exception as e:  # noqa
             print(f"[diagnose] LLM unavailable ({e}); using offline heuristic",

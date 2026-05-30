@@ -148,6 +148,23 @@ wl ; priors save        # learn wl->CPU_BOUND, persist to /priors.db
 `--ollama-host` (`localhost:11434`), `--timeout`, `--poll` (advd tick
 interval), `--sock` (virtio-console unix socket path, default
 `/tmp/xv6advisor.sock`), `--duration`, `--cpus`, `--workload`, `--no-llm`,
-`--hybrid` / `--min-life` (one-shot cold-start classification). Sec-06 defense:
-`--no-defend`, `--bomb-threshold` (group size that triggers a judgment,
-default 6), `--bomb-prio` (demotion priority, default 19).
+`--hybrid` / `--min-life` (one-shot cold-start classification). Sec-05 build
+policy: `--no-demote-builds`. Sec-06 defense: `--no-defend`, `--bomb-threshold`
+(group size that triggers a judgment, default 6), `--bomb-prio` (demotion
+priority, default 19). Latency tuning: `--num-ctx` (1024), `--num-predict`
+(128), `--keep-alive` (10m).
+
+## Latency (report §10)
+
+Measured per-classification latency is **model-bound**: qwen2.5:3b is ~2.0–2.4s
+warm, llama3.2:1b ~1.8s, qwen2.5:0.5b ~1.3s (smaller = faster but less
+reliable). The `--num-ctx`/`--num-predict` caps are sane bounds, not the lever
+(the prompt is tiny and the answer is short). The real levers:
+
+1. **Fewer calls** — `--hybrid` classifies each process once at cold-start then
+   makes zero steady-state calls. This is the dominant total-latency win.
+2. **Model choice** — `--model llama3.2:1b` is ~30% faster warm if you can
+   accept lower reliability (the default 3b is the accuracy-safe pick).
+3. **`--keep-alive`** keeps the model resident so repeated runs skip the reload.
+
+Fastest reliable config: `python3 tools/bridge.py --hybrid --workload "..."`.
