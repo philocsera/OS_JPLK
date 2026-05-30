@@ -5,12 +5,28 @@ option-a). It turns the advisor into a *real* LLM running locally — free, no
 API key, fully offline — instead of the in-guest hardcoded heuristic.
 
 ```
-QEMU stdout  --@@WL frames-->  bridge.py  --HTTP-->  Ollama (local open model)
-QEMU stdin   <--"setcls .."--  bridge.py  <--JSON--  classification
+virtio-console  --@@WL frames-->  bridge.py  --HTTP-->  Ollama (local open model)
+(unix socket)   <--"setcls .."--  bridge.py  <--JSON--  classification
 ```
 
-The kernel never knows an LLM exists: `wlagent` only *exports* procstat, and
-the decision is applied through the existing `setclass` syscall via `setcls`.
+The kernel never knows an LLM exists: the `advd` daemon only *exports* procstat,
+and the decision is applied through the existing `setclass` syscall.
+
+### Dedicated channel (report Plan A)
+
+The advisor protocol runs over a **dedicated virtio-console device**, not the
+shared UART. A second virtio-mmio slot (`0x10002000`, IRQ 2) is driven by
+`kernel/virtio_console.c` and exposed to user space as the device file
+`/advisor`; QEMU backs it with a unix socket. The guest daemon `advd` writes
+`@@WL` frames and reads `setcls`/`setjprio` command lines on `/advisor`; the
+host bridge connects to the socket and speaks the same line protocol (each
+command is answered with an `@@OK`/`@@ERR` ack).
+
+Because frames and commands no longer travel on the UART, they **never
+interleave with the human shell** — the problem the earlier console-shared
+design (Plan B) had. The UART is used only to boot and to launch the workload +
+`advd` once. (Verified: a UART capture during a live bridge run shows zero
+`@@WL`/`@@OK`/`setcls` traffic — `tools/test_advd.py` is the end-to-end check.)
 
 ## 1. One-time setup (the only step that needs network)
 
@@ -115,19 +131,23 @@ wl ; priors save        # learn wl->CPU_BOUND, persist to /priors.db
 
 | where | file | role |
 |-------|------|------|
-| guest | `user/wlagent.c` | background daemon; emits `@@WL [json]` procstat frames (incl. `group`) |
-| guest | `user/setcls.c`  | `setcls <pid> <class>` — applies a class decision via setclass |
-| guest | `user/setjprio.c`| `setjprio <group> <prio>` — demotes a whole job (sec 06 executor) |
+| kernel| `kernel/virtio_console.c` | virtio-console driver for the dedicated channel; exposes `/advisor` (major `ADVISOR`) |
+| guest | `user/advd.c`    | daemon on `/advisor`: writer child emits `@@WL` frames, reader parent applies `setcls`/`setjprio` and acks `@@OK` |
+| guest | `user/setcls.c`  | `setcls <pid> <class>` — standalone console executor (Plan B / manual use) |
+| guest | `user/setjprio.c`| `setjprio <group> <prio>` — standalone console executor (sec 06) |
+| guest | `user/wlagent.c` | legacy console-shared frame emitter (Plan B); superseded by `advd` |
 | guest | `user/ftree.c`   | resident wide fork-tree workload for the pre-emption demo |
 | guest | `user/priors.c`  | dump / `save` / `load` the learned prior table (sec 04 persistence) |
-| host  | `tools/bridge.py`| reads frames, classifies + judges build-vs-bomb via local LLM, injects setcls/setjprio |
+| host  | `tools/bridge.py`| connects the socket, classifies + judges build-vs-bomb via local LLM, sends setcls/setjprio |
+| host  | `tools/test_advd.py`| end-to-end channel test (frames + setcls + ack over the socket) |
 | host  | `tools/diagnose.py`| feeds a `@@PANIC` timeline to the LLM for a NL post-mortem (sec 07) |
 
 ## Options
 
 `--model` (default `qwen2.5:3b`; smaller models are too brittle here),
-`--ollama-host` (`localhost:11434`), `--timeout`, `--poll` (wlagent tick
-interval), `--duration`, `--cpus`, `--workload`, `--no-llm`, `--hybrid` /
-`--min-life` (one-shot cold-start classification). Sec-06 defense:
+`--ollama-host` (`localhost:11434`), `--timeout`, `--poll` (advd tick
+interval), `--sock` (virtio-console unix socket path, default
+`/tmp/xv6advisor.sock`), `--duration`, `--cpus`, `--workload`, `--no-llm`,
+`--hybrid` / `--min-life` (one-shot cold-start classification). Sec-06 defense:
 `--no-defend`, `--bomb-threshold` (group size that triggers a judgment,
 default 6), `--bomb-prio` (demotion priority, default 19).

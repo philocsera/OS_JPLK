@@ -5,16 +5,26 @@ bridge.py — host side of the xv6 "LLM advisor" (report sec 01/04, option-a).
 This is the piece that makes the advisor a *real* LLM instead of a hardcoded
 heuristic, using a FREE LOCAL open model (no API key, fully offline):
 
-    QEMU stdout  --@@WL frames-->  bridge.py  --HTTP-->  Ollama (local LLM)
-    QEMU stdin   <--"setcls .."--  bridge.py  <--JSON--  classification
+    virtio-console  --@@WL frames-->  bridge.py  --HTTP-->  Ollama (local LLM)
+    (unix socket)   <--"setcls .."--  bridge.py  <--JSON--  classification
+
+Transport (report Plan A): the advisor protocol runs over a DEDICATED
+virtio-console channel exposed to the host as a unix socket, NOT the shared
+UART. The guest daemon `advd` writes @@WL frames and reads setcls/setjprio
+command lines on /advisor; the bridge connects to the socket and exchanges the
+same protocol. The UART console is used ONLY to boot and to launch the
+workload + advd once — so frames and commands never interleave with the human
+shell (the problem Plan B had).
 
 Flow:
-  1. Spawn xv6 in QEMU (pexpect owns its stdio), boot, launch `wlagent &`.
-  2. Read each `@@WL [...]` procstat frame the guest emits.
-  3. Ask a local open LLM (Ollama, e.g. qwen2.5:0.5b) to classify each
-     process into one of the 6 scheduler classes.
-  4. For every process whose class changed, type `setcls <pid> <id>` into
-     the shell — applying the LLM's decision through the real setclass syscall.
+  1. Spawn xv6 in QEMU (pexpect owns the UART console), boot, launch the
+     workload and `advd &` on the console (one-time setup).
+  2. Connect to the virtio-console unix socket and read each `@@WL [...]`
+     procstat frame the guest emits over it.
+  3. Ask a local open LLM (Ollama, e.g. qwen2.5:3b) to classify each process
+     into one of the 6 scheduler classes.
+  4. For every process whose class changed, send `setcls <pid> <id>` down the
+     socket — advd applies it through the real setclass syscall and acks @@OK.
 
 Fork-bomb pre-emption (report sec 06): the kernel's per-job fork cap is a
 hard numeric backstop. On top of it, the bridge watches each job-GROUP's size
@@ -34,7 +44,9 @@ test the plumbing with the heuristic only).
 
 import argparse
 import json
+import os
 import re
+import socket
 import sys
 import time
 import urllib.request
@@ -247,14 +259,45 @@ def log(msg):
     print(f"[bridge] {msg}", file=sys.stderr, flush=True)
 
 
-def qemu_command(kernel, fsimg, cpus):
+def qemu_command(kernel, fsimg, cpus, sock):
     return (
         f"qemu-system-riscv64 -machine virt -bios none -kernel {kernel} "
         f"-m 128M -smp {cpus} -nographic "
         f"-global virtio-mmio.force-legacy=false "
         f"-drive file={fsimg},if=none,format=raw,id=x0 "
-        f"-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0"
+        f"-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 "
+        # dedicated virtio-console advisor channel -> unix socket (Plan A)
+        f"-chardev socket,path={sock},server=on,wait=off,id=br0 "
+        f"-device virtio-serial-device,bus=virtio-mmio-bus.1 "
+        f"-device virtconsole,chardev=br0"
     )
+
+
+class Channel:
+    """Line-buffered reader/writer for the virtio-console unix socket. The
+    guest's advd daemon emits one '\\n'-terminated frame or ack per line."""
+
+    def __init__(self, sock):
+        self.sock = sock
+        self.buf = ""
+
+    def next_line(self, timeout):
+        """Return the next complete line (without newline), '' on EOF, or None
+        on timeout."""
+        self.sock.settimeout(timeout)
+        while "\n" not in self.buf:
+            try:
+                data = self.sock.recv(4096).decode(errors="replace")
+            except socket.timeout:
+                return None
+            if not data:
+                return ""  # EOF
+            self.buf += data
+        line, self.buf = self.buf.split("\n", 1)
+        return line
+
+    def send(self, cmd):
+        self.sock.sendall((cmd + "\n").encode())
 
 
 def main():
@@ -267,7 +310,9 @@ def main():
     ap.add_argument("--timeout", type=float, default=20.0,
                     help="LLM HTTP timeout (s); first call cold-loads the model")
     ap.add_argument("--poll", type=int, default=5,
-                    help="wlagent poll interval in ticks")
+                    help="advd poll interval in ticks")
+    ap.add_argument("--sock", default="/tmp/xv6advisor.sock",
+                    help="unix socket path for the virtio-console channel")
     ap.add_argument("--duration", type=float, default=30.0,
                     help="run this many seconds then quit")
     ap.add_argument("--no-llm", action="store_true",
@@ -291,17 +336,31 @@ def main():
                     help="priority a judged fork-bomb group is demoted to (0..20)")
     args = ap.parse_args()
 
-    cmd = qemu_command(args.kernel, args.fsimg, args.cpus)
+    if os.path.exists(args.sock):
+        os.unlink(args.sock)
+    cmd = qemu_command(args.kernel, args.fsimg, args.cpus, args.sock)
     log(f"spawning: {cmd}")
     child = pexpect.spawn(cmd, encoding="utf-8", timeout=60)
 
+    # UART console: boot + one-time launch of the workload and advd. Nothing on
+    # the hot protocol path goes over the console — it stays the human shell.
     child.expect("init: starting sh")
     child.expect(r"\$ ")
     for w in [w.strip() for w in args.workload.split(",") if w.strip()]:
         child.sendline(f"{w} &")
         child.expect(r"\$ ")
-    child.sendline(f"wlagent {args.poll} &")
-    log("wlagent launched; entering classify loop")
+    child.sendline(f"advd {args.poll} &")
+    child.expect(r"\$ ")
+
+    # Connect the dedicated virtio-console channel (the unix socket QEMU serves).
+    for _ in range(100):
+        if os.path.exists(args.sock):
+            break
+        time.sleep(0.05)
+    sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sk.connect(args.sock)
+    chan = Channel(sk)
+    log(f"advd launched; advisor channel connected on {args.sock}; classify loop")
 
     last_sent = {}        # pid -> last class_id we applied (avoid redundant setcls)
     cold_done = set()     # pids already classified by the LLM (hybrid mode)
@@ -314,18 +373,25 @@ def main():
     deadline = time.time() + args.duration
 
     while time.time() < deadline:
-        try:
-            child.expect(FRAME_RE, timeout=10)
-        except pexpect.TIMEOUT:
+        line = chan.next_line(timeout=10)
+        if line is None:
             log("no frame for 10s; still waiting")
             continue
-        except pexpect.EOF:
-            log("QEMU exited")
+        if line == "":
+            log("advisor channel closed (QEMU exited?)")
             break
-
-        raw = child.match.group(1)
+        line = line.strip()
+        if not line:
+            continue
+        # acks from advd for our setcls/setjprio commands.
+        if line.startswith("@@OK") or line.startswith("@@ERR"):
+            log(f"  guest: {line}")
+            continue
+        m = FRAME_RE.match(line)
+        if not m:
+            continue  # not a frame (stray line)
         try:
-            procs = json.loads(raw)
+            procs = json.loads(m.group(1))
         except json.JSONDecodeError:
             continue
         if not procs:
@@ -348,12 +414,7 @@ def main():
                 if verdict == "bomb":
                     demoted_groups.add(g)
                     log(f"  PRE-EMPT fork-bomb: setjprio {g} {args.bomb_prio}")
-                    child.sendline(f"setjprio {g} {args.bomb_prio}")
-                    try:
-                        child.expect(r"setjprio: .*\r?\n", timeout=3)
-                        log(f"  guest: {child.after.strip()}")
-                    except (pexpect.TIMEOUT, pexpect.EOF):
-                        pass
+                    chan.send(f"setjprio {g} {args.bomb_prio}")  # advd acks @@OK
 
         # Hybrid: only ask the LLM about processes we have NOT classified yet
         # (their cold-start). Already-decided pids cost zero LLM calls.
@@ -380,15 +441,14 @@ def main():
             log(f"  pid={pid} name={p['name']} "
                 f"{CLASS_NAMES[p['class']]} -> {CLASS_NAMES[new]} "
                 f"(run={p['run']} sleep={p['sleep']}) via {source}")
-            child.sendline(f"setcls {pid} {new}")
+            chan.send(f"setcls {pid} {new}")  # advd applies + acks @@OK
             last_sent[pid] = new
-            # consume the setcls echo/output so it doesn't confuse frame parsing
-            try:
-                child.expect(r"setcls: .*\r?\n", timeout=3)
-            except (pexpect.TIMEOUT, pexpect.EOF):
-                pass
 
     log("duration reached; shutting down QEMU")
+    try:
+        sk.close()
+    except OSError:
+        pass
     try:
         child.sendcontrol("a")
         child.send("x")

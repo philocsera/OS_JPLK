@@ -23,6 +23,12 @@ main(void)
   dup(0);  // stdout
   dup(0);  // stderr
 
+  // Create the dedicated advisor channel device node (report Plan A). advd
+  // opens /advisor to talk to the host bridge over virtio-console instead of
+  // the shared UART. mknod is a no-op (returns -1, ignored) if the node was
+  // already persisted on the disk image, so this never wedges boot.
+  mknod("advisor", ADVISOR, 0);
+
   // Restore scheduler priors learned before the last reboot (report sec 04).
   // Best-effort: a missing/corrupt /priors.db is a silent no-op in `priors
   // load`, so this can never wedge boot. Wait for it so the table is in place
