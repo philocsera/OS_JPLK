@@ -124,7 +124,8 @@ def heuristic_group(info):
     return "build"
 
 
-def llm_judge_group(info, model, host, timeout):
+def llm_judge_group(info, model, host, timeout,
+                    num_ctx=1024, num_predict=128, keep_alive="10m"):
     """Ask the local LLM to label a job-group build|bomb. Raises on failure."""
     sys_prompt = (
         "You are a scheduler guard for a teaching OS. Decide whether a process "
@@ -152,7 +153,9 @@ def llm_judge_group(info, model, host, timeout):
         ],
         "stream": False,
         "format": "json",
-        "options": {"temperature": 0},
+        "keep_alive": keep_alive,
+        "options": {"temperature": 0, "num_ctx": num_ctx,
+                    "num_predict": num_predict},
     }).encode()
     req = urllib.request.Request(
         f"http://{host}/api/chat", data=body,
@@ -170,7 +173,8 @@ def judge_group(info, args):
     if not args.no_llm:
         try:
             return llm_judge_group(info, args.model, args.ollama_host,
-                                   args.timeout), "LLM"
+                                   args.timeout, args.num_ctx, args.num_predict,
+                                   args.keep_alive), "LLM"
         except (urllib.error.URLError, OSError, KeyError, ValueError,
                 json.JSONDecodeError) as e:
             log(f"group judge LLM unavailable ({type(e).__name__}); heuristic")
@@ -181,7 +185,8 @@ def judge_group(info, args):
 # Local LLM classification via Ollama's HTTP API (no key, offline).
 # Returns {pid: class_id}. Raises on any failure so the caller can fall back.
 # --------------------------------------------------------------------------
-def llm_classify(procs, model, host, timeout):
+def llm_classify(procs, model, host, timeout,
+                 num_ctx=1024, num_predict=128, keep_alive="10m"):
     sys_prompt = (
         "You classify OS processes into one scheduler class for the CPU "
         "scheduler. Decide per process using run vs sleep ticks:\n"
@@ -214,7 +219,13 @@ def llm_classify(procs, model, host, timeout):
         ],
         "stream": False,
         "format": "json",
-        "options": {"temperature": 0},
+        # Latency tuning: a small num_ctx (prompt is tiny) and a capped
+        # num_predict shave cold-start time; keep_alive keeps the model resident
+        # so subsequent runs don't pay the reload. No accuracy cost — the slim
+        # payload fits well under num_ctx and the JSON answer is short.
+        "keep_alive": keep_alive,
+        "options": {"temperature": 0, "num_ctx": num_ctx,
+                    "num_predict": num_predict},
     }).encode()
 
     req = urllib.request.Request(
@@ -241,7 +252,8 @@ def classify_frame(procs, args):
     if not args.no_llm:
         try:
             t0 = time.time()
-            res = llm_classify(procs, args.model, args.ollama_host, args.timeout)
+            res = llm_classify(procs, args.model, args.ollama_host, args.timeout,
+                               args.num_ctx, args.num_predict, args.keep_alive)
             dt = (time.time() - t0) * 1000
             # Fill any process the model omitted with the heuristic.
             for p in procs:
@@ -309,6 +321,15 @@ def main():
     ap.add_argument("--ollama-host", default="localhost:11434")
     ap.add_argument("--timeout", type=float, default=20.0,
                     help="LLM HTTP timeout (s); first call cold-loads the model")
+    # --- LLM latency tuning (report §10) ---
+    ap.add_argument("--num-ctx", type=int, default=1024,
+                    help="LLM context window; the slim payload is tiny so a "
+                         "small ctx cuts cold-start with no accuracy cost")
+    ap.add_argument("--num-predict", type=int, default=128,
+                    help="cap LLM output tokens (the JSON answer is short)")
+    ap.add_argument("--keep-alive", default="10m",
+                    help="keep the model resident between calls (e.g. 10m, -1 "
+                         "for forever) so runs don't pay the reload")
     ap.add_argument("--poll", type=int, default=5,
                     help="advd poll interval in ticks")
     ap.add_argument("--sock", default="/tmp/xv6advisor.sock",
