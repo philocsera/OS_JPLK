@@ -66,6 +66,12 @@ static struct {
   uint in_w;  // write index
 } vcon;
 
+// 0 until the device is found and its queues are live. When the virtio-console
+// device is absent (a plain QEMU with no virtio-serial device, e.g.
+// tools/diagnose.py), the kernel still boots and /advisor read/write just
+// return -1 — the advisor channel is best-effort, never mandatory.
+static int vcon_ready = 0;
+
 // the address of virtio-console mmio register r is via R(); below configures
 // one virtqueue (qidx) and allocates its in-memory rings.
 static void
@@ -149,11 +155,18 @@ virtio_console_init(void)
 
   initlock(&vcon.lock, "vcon");
 
+  // Expose /advisor up front so opening it never dereferences a null devsw
+  // entry, even when the device is absent (read/write guard on vcon_ready).
+  devsw[ADVISOR].read = virtio_console_read;
+  devsw[ADVISOR].write = virtio_console_write;
+
   if(*R(VIRTIO_MMIO_MAGIC_VALUE) != 0x74726976 ||
      *R(VIRTIO_MMIO_VERSION) != 2 ||
      *R(VIRTIO_MMIO_DEVICE_ID) != 3 ||      // 3 == console
      *R(VIRTIO_MMIO_VENDOR_ID) != 0x554d4551){
-    panic("could not find virtio console");
+    // No virtio-console on this QEMU — boot anyway, channel stays disabled.
+    printf("virtio console: device absent; advisor channel disabled\n");
+    return;
   }
 
   *R(VIRTIO_MMIO_STATUS) = status;
@@ -192,9 +205,7 @@ virtio_console_init(void)
     vcon_post_rx(i);
   release(&vcon.lock);
 
-  // expose as the /advisor device file.
-  devsw[ADVISOR].read = virtio_console_read;
-  devsw[ADVISOR].write = virtio_console_write;
+  vcon_ready = 1;   // queues live — /advisor read/write now operate for real
 }
 
 // user write() to /advisor: transmit n bytes out the transmitq. Blocks until
@@ -203,6 +214,9 @@ int
 virtio_console_write(int user_src, uint64 src, int n)
 {
   int total = 0;
+
+  if(!vcon_ready)
+    return -1;   // no device — advisor channel disabled
 
   acquire(&vcon.lock);
   while(total < n){
@@ -265,6 +279,9 @@ virtio_console_read(int user_dst, uint64 dst, int n)
   int target = n;
   char c;
 
+  if(!vcon_ready)
+    return -1;   // no device — advisor channel disabled
+
   acquire(&vcon.lock);
   while(n > 0){
     while(vcon.in_r == vcon.in_w){
@@ -295,6 +312,9 @@ virtio_console_read(int user_dst, uint64 dst, int n)
 void
 virtio_console_intr(void)
 {
+  if(!vcon_ready)
+    return;   // spurious — device never initialized
+
   acquire(&vcon.lock);
 
   // let the device raise further interrupts.
