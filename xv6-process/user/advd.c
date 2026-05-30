@@ -159,6 +159,21 @@ apply_cmd(int afd, char *line)
       p = put_str(obuf, p, " procs=");              p = put_int(obuf, p, n);
       obuf[p++] = '\n';
     }
+  } else if(strcmp(argv[0], "setjcls") == 0 && argc == 3){
+    // apply one CLASS (and its quantum) to a whole job in a single kernel
+    // sweep — the "whole-team policy" the advisor uses on a judged build group.
+    int gid = atoi(argv[1]), cls = atoi(argv[2]);
+    int n = setjobclass(gid, cls);
+    if(n < 0){
+      p = put_str(obuf, p, "@@ERR setjcls group="); p = put_int(obuf, p, gid);
+      p = put_str(obuf, p, " cls=");                p = put_int(obuf, p, cls);
+      obuf[p++] = '\n';
+    } else {
+      p = put_str(obuf, p, "@@OK setjcls group="); p = put_int(obuf, p, gid);
+      p = put_str(obuf, p, " cls=");               p = put_int(obuf, p, cls);
+      p = put_str(obuf, p, " procs=");             p = put_int(obuf, p, n);
+      obuf[p++] = '\n';
+    }
   } else {
     p = put_str(obuf, p, "@@ERR unknown cmd\n");
   }

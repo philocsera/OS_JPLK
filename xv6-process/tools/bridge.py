@@ -334,6 +334,9 @@ def main():
                     help="job-group size that triggers a build-vs-bomb judgment")
     ap.add_argument("--bomb-prio", type=int, default=19,
                     help="priority a judged fork-bomb group is demoted to (0..20)")
+    ap.add_argument("--no-demote-builds", action="store_true",
+                    help="don't apply the whole-team BATCH policy to a judged "
+                         "build group (sec 05)")
     args = ap.parse_args()
 
     if os.path.exists(args.sock):
@@ -369,7 +372,8 @@ def main():
     # bounded demo; a production guard would re-evaluate on continued growth and
     # lift the demotion if a group later looks legitimate.
     judged_groups = {}    # group_id -> "build"|"bomb"
-    demoted_groups = set()  # groups already throttled via setjprio
+    demoted_groups = set()  # bomb groups already throttled via setjprio
+    build_demoted = set()   # build groups already put into BATCH via setjcls
     deadline = time.time() + args.duration
 
     while time.time() < deadline:
@@ -415,6 +419,16 @@ def main():
                     demoted_groups.add(g)
                     log(f"  PRE-EMPT fork-bomb: setjprio {g} {args.bomb_prio}")
                     chan.send(f"setjprio {g} {args.bomb_prio}")  # advd acks @@OK
+                elif verdict == "build" and not args.no_demote_builds:
+                    # Whole-team policy (sec 05): the advisor recognized a job-
+                    # GROUP as a legit background build, so it puts the ENTIRE
+                    # team into the BATCH (background bulk) class in ONE kernel
+                    # sweep — not pid-by-pid. setjobclass also sets each member's
+                    # quantum. This is the "demote the whole build team" action.
+                    build_demoted.add(g)
+                    log(f"  BUILD policy: setjcls {g} {NAME_TO_ID['BATCH']} "
+                        f"(whole-team -> BATCH)")
+                    chan.send(f"setjcls {g} {NAME_TO_ID['BATCH']}")  # advd acks @@OK
 
         # Hybrid: only ask the LLM about processes we have NOT classified yet
         # (their cold-start). Already-decided pids cost zero LLM calls.

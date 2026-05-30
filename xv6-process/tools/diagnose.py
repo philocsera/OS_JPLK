@@ -114,6 +114,60 @@ FEWSHOT_ANSWER = (
 )
 
 
+PANIC_RE = re.compile(r'@@PANIC reason="([^"]*)" tick=(\d+) events=(\d+)')
+EV_RE = re.compile(
+    r'@@EV tick=(\d+) type=(\w+) pid=(\d+) name=(\S+) d1=(-?\d+) d2=(-?\d+) msg=(.*)')
+
+
+def heuristic_diagnose(timeline):
+    """Offline, rule-based natural-language post-mortem (fail-static fallback
+    when the local LLM is unreachable). Mirrors the LLM's field semantics so the
+    sec-07 story still works without Ollama — degrades, doesn't break."""
+    reason, ptick = "?", "?"
+    m = PANIC_RE.search(timeline)
+    if m:
+        reason, ptick = m.group(1), m.group(2)
+    evs = [e for e in (EV_RE.match(l) for l in timeline.splitlines()) if e]
+    forkfail = [e for e in evs if e.group(2) == "FORKFAIL"]
+    exits = [e for e in evs if e.group(2) == "EXIT"]
+    notes = [e for e in evs if e.group(2) == "NOTE"]
+    classes = [e for e in evs if e.group(2) == "CLASS"]
+
+    parts = []
+    if notes:
+        parts.append(f'Userspace left {len(notes)} breadcrumb(s) '
+                     f'(e.g. "{notes[0].group(7).strip()}").')
+    if exits:
+        e = exits[0]
+        run, slp = int(e.group(5)), int(e.group(6))
+        kind = "CPU-bound (spinning)" if run > slp else "I/O-/sleep-bound"
+        parts.append(f"Process '{e.group(4)}' exited after {run} run / {slp} "
+                     f"sleep ticks ({kind}).")
+    if forkfail:
+        groups = sorted(set(e.group(5) for e in forkfail))
+        cap = forkfail[0].group(6)
+        parts.append(
+            f"The per-job fork cap refused {len(forkfail)} fork(s) on job-group "
+            f"{','.join(groups)} at {cap} live procs — the anti-fork-bomb "
+            f"defense engaged as designed (this is containment, NOT "
+            f"out-of-memory).")
+    if classes:
+        parts.append(f"The advisor reclassified {len(classes)} process(es) "
+                     f"along the way.")
+    if "oom" in reason.lower() or "kalloc" in reason.lower():
+        cause = (f'the panic reason "{reason}" points to memory exhaustion at '
+                 f'tick {ptick}'
+                 + (", consistent with the fork storm above" if forkfail else ""))
+    elif forkfail:
+        cause = (f'the panic reason "{reason}" at tick {ptick} followed a fork '
+                 f'storm the cap was already containing, so the runaway tree is '
+                 f'the leading suspect')
+    else:
+        cause = f'the panic reason "{reason}" at tick {ptick} is the direct cause'
+    parts.append(f"Likely root cause: {cause}.")
+    return " ".join(parts)
+
+
 def diagnose(timeline, model, host, timeout):
     body = json.dumps({
         "model": model,
@@ -144,6 +198,8 @@ def main():
     ap.add_argument("--workload", default="crashme")
     ap.add_argument("--logfile", help="read a captured timeline instead of "
                                       "booting QEMU")
+    ap.add_argument("--no-llm", action="store_true",
+                    help="skip the LLM; use the offline heuristic diagnosis")
     args = ap.parse_args()
 
     if args.logfile:
@@ -156,12 +212,23 @@ def main():
 
     print("==== kernel panic timeline ====")
     print(timeline)
-    print("\n==== LLM diagnosis (%s) ====" % args.model)
-    try:
-        print(diagnose(timeline, args.model, args.ollama_host, args.timeout))
-    except Exception as e:  # noqa
-        print(f"[diagnose] LLM unavailable: {e}", file=sys.stderr)
-        sys.exit(1)
+
+    diag, src = None, None
+    if not args.no_llm:
+        try:
+            diag = diagnose(timeline, args.model, args.ollama_host, args.timeout)
+            src = f"LLM {args.model}"
+        except Exception as e:  # noqa
+            print(f"[diagnose] LLM unavailable ({e}); using offline heuristic",
+                  file=sys.stderr)
+    if diag is None:
+        # fail-static: a real LLM gives a richer narrative, but the timeline is
+        # structured enough for a rule-based summary so sec 07 still works offline.
+        diag = heuristic_diagnose(timeline)
+        src = "offline heuristic"
+
+    print(f"\n==== diagnosis ({src}) ====")
+    print(diag)
 
 
 if __name__ == "__main__":
