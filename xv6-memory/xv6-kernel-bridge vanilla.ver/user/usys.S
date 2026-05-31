@@ -131,3 +131,13 @@ setmemquota:
  li a7, SYS_setmemquota
  ecall
  ret
+.global swapout
+swapout:
+ li a7, SYS_swapout
+ ecall
+ ret
+.global getswapstat
+getswapstat:
+ li a7, SYS_getswapstat
+ ecall
+ ret
