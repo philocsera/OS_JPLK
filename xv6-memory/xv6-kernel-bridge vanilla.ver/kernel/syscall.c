@@ -106,6 +106,7 @@ extern uint64 sys_setpriority(void);
 extern uint64 sys_getpriority(void);
 extern uint64 sys_getmemstat(void); //
 extern uint64 sys_setmemquota(void); //
+extern uint64 sys_swapout(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -136,6 +137,7 @@ static uint64 (*syscalls[])(void) = {
 [SYS_getpriority] sys_getpriority,
 [SYS_getmemstat] sys_getmemstat, //
 [SYS_setmemquota] sys_setmemquota, //
+[SYS_swapout] sys_swapout,
 };
 
 static char *syscall_names[] = {

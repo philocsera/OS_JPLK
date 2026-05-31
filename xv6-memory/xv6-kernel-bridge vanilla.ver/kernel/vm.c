@@ -7,6 +7,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "fs.h"
+#include "swap.h"
 
 /*
  * the kernel's page table.
@@ -31,6 +32,7 @@ kvmmake(void)
 
   // virtio mmio disk interface
   kvmmap(kpgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+  kvmmap(kpgtbl, VIRTIO1, VIRTIO1, PGSIZE, PTE_R | PTE_W);
 
   // PLIC
   kvmmap(kpgtbl, PLIC, PLIC, 0x4000000, PTE_R | PTE_W);
@@ -200,7 +202,12 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0) // leaf page table entry allocated?
-      continue;   
+      continue;
+    if(IS_SWAPPED(*pte)){         // 디스크에 있는 페이지 → 슬롯 회수
+      swap_free_slot(PTE_TO_SWAP_SLOT(*pte));
+      *pte = 0;
+      continue;                   // 물리 페이지 없으니 kfree 금지
+    }
     if((*pte & PTE_V) == 0)  // has physical page been allocated?
       continue;
     if(do_free){
@@ -272,6 +279,8 @@ freewalk(pagetable_t pagetable)
       pagetable[i] = 0;
     } else if(pte & PTE_V){
       panic("freewalk: leaf");
+    } else if(IS_SWAPPED(pte)){
+      panic("freewalk: swapped leaf");  // uvmunmap이 슬롯 회수를 빠뜨렸다는 신호
     }
   }
   kfree((void*)pagetable);
@@ -304,6 +313,30 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       continue;   // page table entry hasn't been allocated
+    if(IS_SWAPPED(*pte)){         // 부모가 swap한 페이지 → 자식용 슬롯에 복제
+      int pslot = PTE_TO_SWAP_SLOT(*pte);
+      int cslot = swap_alloc_slot();
+      if(cslot < 0)
+        goto err;                 // swap 영역 가득
+      if((mem = kalloc()) == 0){  // 디스크간 복사용 임시 버퍼
+        swap_free_slot(cslot);
+        goto err;
+      }
+      if(swap_read_slot(pslot, mem) < 0 ||
+         swap_write_slot(cslot, mem) < 0){
+        kfree(mem);
+        swap_free_slot(cslot);
+        goto err;
+      }
+      kfree(mem);
+      pte_t *cpte = walk(new, i, 1);   // 자식 leaf PTE 확보
+      if(cpte == 0){
+        swap_free_slot(cslot);
+        goto err;
+      }
+      *cpte = MAKE_SWAP_PTE(cslot);    // V=0, U=1, slot 인코딩
+      continue;
+    }
     if((*pte & PTE_V) == 0)
       continue;   // physical page hasn't been allocated
     pa = PTE2PA(*pte);
@@ -453,11 +486,25 @@ uint64
 vmfault(pagetable_t pagetable, uint64 va, int read)
 {
   uint64 mem;
+  pte_t *pte;
   struct proc *p = myproc();
 
   if (va >= p->sz)
     return 0;
   va = PGROUNDDOWN(va);
+
+  // --- swap-in 분기: lazy/ismapped 보다 먼저 ---
+  // swap PTE는 V=0 이라 ismapped()가 못 잡음. 여기서 가로채지 않으면
+  // 아래 lazy 경로가 zero 페이지로 덮어써 디스크 데이터를 잃는다.
+  pte = walk(pagetable, va, 1);   // leaf table 확보 (없으면 할당)
+  if(pte == 0)
+    return 0;                     // 페이지테이블 페이지 부족
+  if(IS_SWAPPED(*pte)){
+    if(swapin_page(pagetable, va) < 0)  // int 0/-1 규약
+      return 0;
+    return walkaddr(pagetable, va);     // V=1·U=1 복구됨 → 정확한 pa
+  }
+
   if(ismapped(pagetable, va)) {
     return 0;
   }

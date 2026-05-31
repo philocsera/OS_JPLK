@@ -25,3 +25,4 @@
 #define SYS_getpriority 24
 #define SYS_getmemstat 25
 #define SYS_setmemquota 26
+#define SYS_swapout 27

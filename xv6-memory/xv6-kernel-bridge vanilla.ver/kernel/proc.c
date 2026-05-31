@@ -126,6 +126,9 @@ found:
   p->priority = 10;
   p->state = USED;
   p->mem_quota = 0;
+  p->swap_clock_hand = 0;
+  p->swapout_count = 0;
+  p->swapin_count = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -173,6 +176,9 @@ freeproc(struct proc *p)
   p->xstate = 0;
   p->trace_mask = 0;
   p->priority = 0;
+  p->swap_clock_hand = 0;
+  p->swapout_count = 0;
+  p->swapin_count = 0;
   p->state = UNUSED;
 
 }
@@ -285,7 +291,14 @@ kfork(void)
   }
 
   // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+  // uvmcopy의 swap 분기(swap_read/write_slot → bread/bwrite)는 buffer
+  // sleep-lock에서 sleep할 수 있다. np->lock(spinlock) 보유 중 sleep은
+  // "sched locks"/"acquire" panic 유발. np는 아직 USED 상태(RUNNABLE 아님)
+  // 이라 이 구간에 lock을 풀어도 스케줄러가 집어가지 않는다.
+  release(&np->lock);
+  int copied = uvmcopy(p->pagetable, np->pagetable, p->sz);
+  acquire(&np->lock);
+  if(copied < 0){
     freeproc(np);
     release(&np->lock);
     return -1;

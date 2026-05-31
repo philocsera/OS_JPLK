@@ -177,9 +177,21 @@ int             plic_claim(void);
 void            plic_complete(int);
 
 // virtio_disk.c
-void            virtio_disk_init(void);
+void            virtio_disk_init(int);
 void            virtio_disk_rw(struct buf *, int);
-void            virtio_disk_intr(void);
+void            virtio_disk_intr(int);
+
+// swap.c
+void            swapinit(void);
+int             swap_alloc_slot(void);
+void            swap_free_slot(int);
+int             swap_write_slot(int, char*);
+int             swap_read_slot(int, char*);
+int             swap_used_slots(void);
+int             swap_total_slots(void);
+int             swapout_proc(int);
+int             swapout_one_page(struct proc*);
+int             swapin_page(pagetable_t, uint64);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))

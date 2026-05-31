@@ -55,3 +55,6 @@ void free(void*);
 // memstat.h
 int getmemstat(struct memstat *, int);
 int setmemquota(int, int);
+
+// swap.h
+int swapout(int);

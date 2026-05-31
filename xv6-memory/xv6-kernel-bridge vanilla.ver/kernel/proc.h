@@ -105,7 +105,12 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
-  int trace_mask;   
-  
+  int trace_mask;
+
   int priority;
+
+  // swap (memhint) — swap.c가 사용
+  uint64 swap_clock_hand;      // Clock 알고리즘 시계 바늘 위치
+  uint64 swapout_count;        // 누적 swapout 횟수 (thrashing 진단용)
+  uint64 swapin_count;         // 누적 swapin 횟수
 };

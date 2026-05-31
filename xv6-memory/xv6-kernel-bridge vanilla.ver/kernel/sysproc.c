@@ -263,3 +263,15 @@ sys_setmemquota(void)
 
   return -1;
 }
+
+uint64
+sys_swapout(void)
+{
+  int pid;
+  argint(0, &pid);
+
+  if(pid == 1 || pid == 2)
+    return -1;
+
+  return swapout_proc(pid);
+}
