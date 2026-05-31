@@ -7,6 +7,8 @@ from pathlib import Path
 PROTECTED_NAMES = {"init", "sh"}
 WARN_USAGE = 70
 DANGER_USAGE = 90
+SWAP_WARN_USAGE = 50.0
+SWAP_DANGER_USAGE = 80.0
 STATE_FILE = Path(".bridge_state.json")
 
 def load_state():
@@ -48,16 +50,81 @@ def extract_json_lines(text):
 def analyze_snapshot(snapshot, state):
     results = []
 
+    # 시스템 전체 swap 상태와 이전 snapshot 대비 변화량
+    swap = snapshot.get("swap", {})
+    used_slots = int(swap.get("used_slots", 0))
+    total_slots = int(swap.get("total_slots", 0))
+
+    if total_slots > 0:
+        swap_usage_percent = round((used_slots * 100.0) / total_slots, 2)
+    else:
+        swap_usage_percent = -1.0
+
+    prev_system = state.get("_system", {})
+    prev_used_slots = int(prev_system.get("used_slots", used_slots))
+    swap_used_delta = used_slots - prev_used_slots
+
+    state["_system"] = {
+        "used_slots": used_slots,
+        "total_slots": total_slots,
+        "swap_usage_percent": swap_usage_percent,
+    }
+
+    snapshot["_bridge_swap"] = {
+        "used_slots": used_slots,
+        "total_slots": total_slots,
+        "swap_usage_percent": swap_usage_percent,
+        "used_slots_delta": swap_used_delta,
+    }
+
+    # system swap pressure
+    if swap_usage_percent >= SWAP_DANGER_USAGE:
+        results.append((
+            0,
+            "system",
+            "DANGER",
+            f"swap_usage={swap_usage_percent}% "
+            f"used_slots={used_slots}/{total_slots} "
+            f"delta={swap_used_delta}",
+            "send_to_llm",
+        ))
+    elif swap_usage_percent >= SWAP_WARN_USAGE and swap_used_delta > 0:
+        results.append((
+            0,
+            "system",
+            "WARN",
+            f"swap_usage={swap_usage_percent}% "
+            f"used_slots={used_slots}/{total_slots} "
+            f"delta={swap_used_delta}",
+            "log_only",
+        ))
+
     for p in snapshot.get("processes", []):
         pid = p.get("pid")
         name = p.get("name", "")
         sz = int(p.get("sz", 0))
         quota = int(p.get("quota", 0))
         usage = int(p.get("usage", -1))
+        quota_denied_count = int(p.get("quota_denied_count", 0))
+        swapout_count = int(p.get("swapout_count", 0))
+        swapin_count = int(p.get("swapin_count", 0))
 
         key = f"{pid}:{name}"
-        prev_sz = int(state.get(key, {}).get("sz", sz))
+        prev = state.get(key, {})
+
+        prev_sz = int(prev.get("sz", sz))
+        prev_quota_denied = int(
+            prev.get("quota_denied_count", quota_denied_count)
+        )
+        prev_swapout = int(prev.get("swapout_count", swapout_count))
+        prev_swapin = int(prev.get("swapin_count", swapin_count))
+
         growth = sz - prev_sz
+        quota_denied_delta = quota_denied_count - prev_quota_denied
+        swapout_delta = swapout_count - prev_swapout
+        swapin_delta = swapin_count - prev_swapin
+
+        thrashing_suspected = swapout_delta > 0 and swapin_delta > 0
 
         state[key] = {
             "pid": pid,
@@ -65,24 +132,76 @@ def analyze_snapshot(snapshot, state):
             "sz": sz,
             "quota": quota,
             "usage": usage,
+            "growth": growth,
+            "quota_denied_count": quota_denied_count,
+            "quota_denied_delta": quota_denied_delta,
+            "swapout_count": swapout_count,
+            "swapout_delta": swapout_delta,
+            "swapin_count": swapin_count,
+            "swapin_delta": swapin_delta,
+            "thrashing_suspected": thrashing_suspected,
         }
+
+        snapshot.setdefault("_bridge_process_metrics", {})[key] = state[key]
 
         if name in PROTECTED_NAMES:
             results.append((pid, name, "SKIP", "protected process", "no_action"))
             continue
 
-        if quota > 0:
-            if usage >= DANGER_USAGE:
-                results.append((pid, name, "DANGER", f"usage={usage}% quota={quota}", "send_to_llm"))
-            elif usage >= WARN_USAGE:
-                results.append((pid, name, "WARN", f"usage={usage}% quota={quota}", "log_only"))
-            else:
-                results.append((pid, name, "OK", f"usage={usage}% quota={quota}", "no_action"))
+        danger_reasons = []
+        watch_reasons = []
+
+        if quota > 0 and usage >= DANGER_USAGE:
+            danger_reasons.append(f"quota_usage={usage}%")
+
+        if quota_denied_delta > 0:
+            danger_reasons.append(
+                f"quota_denied_delta={quota_denied_delta}"
+            )
+
+        if thrashing_suspected:
+            danger_reasons.append(
+                f"thrashing_suspected "
+                f"swapout_delta={swapout_delta} "
+                f"swapin_delta={swapin_delta}"
+            )
+
+        if quota > 0 and WARN_USAGE <= usage < DANGER_USAGE:
+            watch_reasons.append(f"quota_usage={usage}%")
+
+        if growth > 0 and sz >= 32768:
+            watch_reasons.append(f"growth={growth} sz={sz}")
+
+        if swapout_delta > 0:
+            watch_reasons.append(f"swapout_delta={swapout_delta}")
+
+        if swapin_delta > 0:
+            watch_reasons.append(f"swapin_delta={swapin_delta}")
+
+        if danger_reasons:
+            results.append((
+                pid,
+                name,
+                "DANGER",
+                ", ".join(danger_reasons),
+                "send_to_llm",
+            ))
+        elif watch_reasons:
+            results.append((
+                pid,
+                name,
+                "WATCH",
+                ", ".join(watch_reasons),
+                "log_only",
+            ))
         else:
-            if growth > 0 and sz >= 32768:
-                results.append((pid, name, "WATCH", f"sz={sz} growth={growth}", "maybe_send_to_llm"))
-            else:
-                results.append((pid, name, "OK", f"sz={sz} quota=0", "no_action"))
+            results.append((
+                pid,
+                name,
+                "OK",
+                f"sz={sz} quota={quota}",
+                "no_action",
+            ))
 
     return results
 
@@ -106,6 +225,8 @@ def print_results(results):
 def build_llm_prompt(snapshot, results):
     danger_processes = []
 
+    process_lookup = snapshot.get("_bridge_process_metrics", {})
+
     for r in results:
         # tuple style used by current bridge.py:
         # (pid, name, level, detail, action)
@@ -118,7 +239,12 @@ def build_llm_prompt(snapshot, results):
                     "pid": pid,
                     "name": name,
                     "detail": detail,
-                    "action": action
+                    "action": action,
+                    "metrics": (
+                        snapshot.get("_bridge_swap", {})
+                        if pid == 0
+                        else process_lookup.get(f"{pid}:{name}", {})
+                    )
                 })
 
         # dict style support for future version
@@ -130,27 +256,41 @@ def build_llm_prompt(snapshot, results):
         return None
 
     prompt_data = {
-        "task": "Analyze xv6 process memory quota status and recommend an action.",
+        "task": "Analyze xv6 quota pressure, swap pressure, and possible thrashing. Recommend exactly one safe runtime policy candidate.",
         "system_context": {
             "os": "xv6-riscv",
             "kernel_policy": "growproc blocks memory growth when process size exceeds mem_quota",
+            "swap_policy": "swapout moves a selected process page to swap.img; later access triggers page-fault-based swapin",
             "protected_processes": ["init", "sh"],
-            "bridge_rule": "Only processes with quota usage >= 90% are sent to LLM"
+            "bridge_rule": "Only DANGER findings are sent to the LLM. WATCH findings are logged locally."
         },
         "snapshot_tick": snapshot.get("tick", "?"),
+        "system_swap": snapshot.get("_bridge_swap", snapshot.get("swap", {})),
         "danger_processes": danger_processes,
+        "observed_processes": snapshot.get("processes", []),
+        "safety_constraints": [
+            "Recommend only one action for at most one target pid.",
+            "Do not execute commands or modify kernel state directly.",
+            "Never modify or swap out protected processes: init, sh.",
+            "decrease_quota requires target_quota >= current_sz + 4096.",
+            "release_quota requires target_quota = 0 and manual approval.",
+            "swapout requires a conservative positive page count and manual approval."
+        ],
         "allowed_actions": [
             "no_action",
-            "recommend_keep_quota",
-            "recommend_setquota",
-            "recommend_increase_quota",
-            "recommend_inspect_process"
+            "keep_quota",
+            "increase_quota",
+            "decrease_quota",
+            "release_quota",
+            "swapout",
+            "inspect_process"
         ],
         "response_format": {
             "action": "one of allowed_actions",
-            "pid": "target process pid",
-            "quota": "recommended quota value or current quota",
-            "reason": "short explanation",
+            "target_pid": "integer process pid, or 0 for system-wide inspection",
+            "target_quota": "integer bytes or null",
+            "swapout_pages": "positive integer pages or null",
+            "reason": "short explanation based on observed metrics",
             "confidence": "low | medium | high"
         }
     }
