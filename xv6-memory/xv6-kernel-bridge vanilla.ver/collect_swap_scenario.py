@@ -7,6 +7,20 @@ from pathlib import Path
 import pexpect
 
 
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+            stream.flush()
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
 def extract_memstat_lines(text):
     lines = []
 
@@ -52,6 +66,10 @@ def main():
         default="logs/memwatch_swap_actual.jsonl",
     )
     parser.add_argument("--timeout", type=int, default=240)
+    parser.add_argument(
+        "--transcript",
+        default="logs/qemu_swap_actual.log",
+    )
     args = parser.parse_args()
 
     if args.pages <= 0:
@@ -63,6 +81,9 @@ def main():
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    transcript_path = Path(args.transcript)
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
+
     print("[scenario] starting QEMU")
 
     child = pexpect.spawn(
@@ -72,7 +93,12 @@ def main():
         timeout=args.timeout,
     )
 
-    child.logfile = sys.stdout
+    transcript_file = transcript_path.open(
+        "w",
+        encoding="utf-8",
+    )
+
+    child.logfile = Tee(sys.stdout, transcript_file)
 
     try:
         child.expect_exact("$ ")
@@ -124,6 +150,7 @@ def main():
         raise SystemExit(1)
 
     stop_qemu(child)
+    transcript_file.close()
 
     lines = extract_memstat_lines(captured)
 
@@ -137,6 +164,7 @@ def main():
 
     print(f"[scenario] saved snapshots: {len(lines)}")
     print(f"[scenario] output: {out_path}")
+    print(f"[scenario] transcript: {transcript_path}")
 
 
 if __name__ == "__main__":
