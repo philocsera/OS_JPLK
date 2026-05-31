@@ -9,6 +9,7 @@ WARN_USAGE = 70
 DANGER_USAGE = 90
 SWAP_WARN_USAGE = 50.0
 SWAP_DANGER_USAGE = 80.0
+SWAP_CYCLE_WINDOW = 5
 STATE_FILE = Path(".bridge_state.json")
 
 def load_state():
@@ -124,7 +125,29 @@ def analyze_snapshot(snapshot, state):
         swapout_delta = swapout_count - prev_swapout
         swapin_delta = swapin_count - prev_swapin
 
-        thrashing_suspected = swapout_delta > 0 and swapin_delta > 0
+        prev_outstanding = int(
+            prev.get(
+                "outstanding_swap_pages",
+                max(0, prev_swapout - prev_swapin),
+            )
+        )
+        outstanding_swap_pages = max(0, swapout_count - swapin_count)
+
+        swap_cycle_count = int(prev.get("swap_cycle_count", 0))
+        swap_activity_age = int(prev.get("swap_activity_age", 0))
+
+        if swapout_delta > 0 or swapin_delta > 0:
+            swap_activity_age = 0
+        else:
+            swap_activity_age += 1
+
+        if swap_activity_age > SWAP_CYCLE_WINDOW:
+            swap_cycle_count = 0
+
+        if swapin_delta > 0 and prev_outstanding > 0:
+            swap_cycle_count += 1
+
+        thrashing_suspected = swap_cycle_count >= 2
 
         state[key] = {
             "pid": pid,
@@ -139,6 +162,9 @@ def analyze_snapshot(snapshot, state):
             "swapout_delta": swapout_delta,
             "swapin_count": swapin_count,
             "swapin_delta": swapin_delta,
+            "outstanding_swap_pages": outstanding_swap_pages,
+            "swap_cycle_count": swap_cycle_count,
+            "swap_activity_age": swap_activity_age,
             "thrashing_suspected": thrashing_suspected,
         }
 
@@ -162,6 +188,7 @@ def analyze_snapshot(snapshot, state):
         if thrashing_suspected:
             danger_reasons.append(
                 f"thrashing_suspected "
+                f"swap_cycle_count={swap_cycle_count} "
                 f"swapout_delta={swapout_delta} "
                 f"swapin_delta={swapin_delta}"
             )
@@ -177,6 +204,9 @@ def analyze_snapshot(snapshot, state):
 
         if swapin_delta > 0:
             watch_reasons.append(f"swapin_delta={swapin_delta}")
+
+        if swap_cycle_count == 1 and not thrashing_suspected:
+            watch_reasons.append("swap_recovery_cycle=1")
 
         if danger_reasons:
             results.append((
