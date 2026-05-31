@@ -14,6 +14,12 @@ COUNT_FIELDS = {
     "swapin_count",
 }
 
+BAD_TRANSCRIPT_PATTERNS = {
+    "panic:",
+    "kerneltrap",
+    "usertrap(): unexpected",
+}
+
 
 def load_snapshots(path):
     snapshots = []
@@ -133,10 +139,40 @@ def verify(snapshots, require_swap_activity):
     return checks, errors
 
 
+def verify_transcript(path):
+    if not path:
+        return {
+            "checked": False,
+            "fatal_patterns": [],
+        }, []
+
+    text = Path(path).read_text(
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    hits = [
+        pattern
+        for pattern in BAD_TRANSCRIPT_PATTERNS
+        if pattern in text
+    ]
+
+    errors = [
+        f"transcript contains fatal pattern: {pattern}"
+        for pattern in hits
+    ]
+
+    return {
+        "checked": True,
+        "fatal_patterns": hits,
+    }, errors
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--log", required=True)
     parser.add_argument("--require-swap-activity", action="store_true")
+    parser.add_argument("--transcript")
     parser.add_argument(
         "--out",
         default="logs/hard_verifier_result.json",
@@ -150,11 +186,18 @@ def main():
         args.require_swap_activity,
     )
 
-    errors = parse_errors + verify_errors
+    transcript_checks, transcript_errors = verify_transcript(
+        args.transcript
+    )
+
+    errors = parse_errors + verify_errors + transcript_errors
 
     result = {
         "hard_verifier_passed": not errors,
-        "checks": checks,
+        "checks": {
+            **checks,
+            "transcript": transcript_checks,
+        },
         "errors": errors,
     }
 
