@@ -26,3 +26,4 @@
 #define SYS_getmemstat 25
 #define SYS_setmemquota 26
 #define SYS_swapout 27
+#define SYS_getswapstat 28

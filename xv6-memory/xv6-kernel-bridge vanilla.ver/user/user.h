@@ -1,7 +1,8 @@
 #define SBRK_ERROR ((char *)-1)
 
 struct stat;
-struct memstat; //
+struct memstat;
+struct swapstat; //
 
 // system calls
 int fork(void);
@@ -58,3 +59,4 @@ int setmemquota(int, int);
 
 // swap.h
 int swapout(int);
+int getswapstat(struct swapstat *);

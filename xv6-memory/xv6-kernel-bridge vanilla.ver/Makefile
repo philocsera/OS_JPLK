@@ -152,6 +152,8 @@ UPROGS=\
 	$U/_memstress\
 	$U/_memwatch\
 	$U/_setquota\
+	$U/_memhold\
+	$U/_swapctl\
 	$U/_swaptest\
 
 fs.img: mkfs/mkfs README $(UPROGS)

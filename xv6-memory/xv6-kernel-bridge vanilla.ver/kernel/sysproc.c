@@ -6,7 +6,8 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "vm.h"
-#include "memstat.h" //
+#include "memstat.h"
+#include "swapstat.h" //
 extern struct proc proc[NPROC];
 
 uint64
@@ -204,6 +205,9 @@ sys_getmemstat(void)
     m.state = p->state;
     m.sz = p->sz;
     m.mem_quota = p->mem_quota;
+    m.quota_denied_count = p->quota_denied_count;
+    m.swapout_count = p->swapout_count;
+    m.swapin_count = p->swapin_count;
     safestrcpy(m.name, p->name, sizeof(m.name));
 
     release(&p->lock);
@@ -219,6 +223,24 @@ sys_getmemstat(void)
   }
 
   return count;
+}
+
+uint64
+sys_getswapstat(void)
+{
+  uint64 uaddr;
+  struct swapstat s;
+  struct proc *p = myproc();
+
+  argaddr(0, &uaddr);
+
+  s.used_slots = swap_used_slots();
+  s.total_slots = swap_total_slots();
+
+  if(copyout(p->pagetable, uaddr, (char *)&s, sizeof(s)) < 0)
+    return -1;
+
+  return 0;
 }
 
 uint64

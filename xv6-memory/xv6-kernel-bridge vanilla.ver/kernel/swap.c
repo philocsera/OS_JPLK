@@ -327,6 +327,10 @@ swapout_one_page(struct proc *p)
   }
   *pte2 = MAKE_SWAP_PTE(slot);
   sfence_vma();
+
+  // 성공한 swap-out 횟수 기록
+  p->swapout_count++;
+
   release(&p->lock);
 
   // Phase 4: 물리 페이지 반환

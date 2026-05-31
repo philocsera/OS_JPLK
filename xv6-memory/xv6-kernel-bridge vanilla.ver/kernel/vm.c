@@ -502,6 +502,10 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
   if(IS_SWAPPED(*pte)){
     if(swapin_page(pagetable, va) < 0)  // int 0/-1 규약
       return 0;
+
+    // 성공한 swap-in 횟수 기록
+    p->swapin_count++;
+
     return walkaddr(pagetable, va);     // V=1·U=1 복구됨 → 정확한 pa
   }
 

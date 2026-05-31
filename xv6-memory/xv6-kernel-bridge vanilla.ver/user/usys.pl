@@ -49,3 +49,4 @@ entry("getpriority");
 entry("getmemstat");
 entry("setmemquota");
 entry("swapout");
+entry("getswapstat");

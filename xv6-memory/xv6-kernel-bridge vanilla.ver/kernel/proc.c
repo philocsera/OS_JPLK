@@ -126,6 +126,7 @@ found:
   p->priority = 10;
   p->state = USED;
   p->mem_quota = 0;
+  p->quota_denied_count = 0;
   p->swap_clock_hand = 0;
   p->swapout_count = 0;
   p->swapin_count = 0;
@@ -167,7 +168,8 @@ freeproc(struct proc *p)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
   p->sz = 0;
-  p->mem_quota = 0; //
+  p->mem_quota = 0;
+  p->quota_denied_count = 0; //
   p->pid = 0;
   p->parent = 0;
   p->name[0] = 0;
@@ -256,6 +258,7 @@ growproc(int n)
   if(n > 0){
     if(p->mem_quota > 0){
       if(sz >= p->mem_quota || (uint64)n > p->mem_quota - sz){
+        p->quota_denied_count++;
         printf("[quota denied] pid=%d name=%s sz=%d request=%d quota=%d\n",
           p->pid,
           p->name,

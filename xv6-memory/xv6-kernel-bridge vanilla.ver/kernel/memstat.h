@@ -9,6 +9,9 @@ struct memstat {
   int state;
   uint64 sz;
   uint64 mem_quota;
+  uint64 quota_denied_count;
+  uint64 swapout_count;
+  uint64 swapin_count;
   char name[MEMSTAT_NAME_LEN];
 };
 
