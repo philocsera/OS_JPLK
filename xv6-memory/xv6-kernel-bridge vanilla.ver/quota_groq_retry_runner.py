@@ -33,14 +33,42 @@ def load_json(path):
 
 def extract_prompt_json(path):
     raw = Path(path).read_text(encoding="utf-8")
+    decoder = json.JSONDecoder()
+    candidates = []
 
-    start = raw.find("{")
-    end = raw.rfind("}")
+    # 로그 안에 prompt JSON 블록이 여러 개 있어도,
+    # 정상 파싱 가능한 객체를 모두 찾은 뒤 마지막 prompt를 사용한다.
+    for index, char in enumerate(raw):
+        if char != "{":
+            continue
 
-    if start == -1 or end == -1 or start >= end:
-        raise RuntimeError(f"JSON prompt object not found: {path}")
+        try:
+            value, _ = decoder.raw_decode(raw[index:])
+        except json.JSONDecodeError:
+            continue
 
-    return json.loads(raw[start:end + 1])
+        if not isinstance(value, dict):
+            continue
+
+        # LLM prompt인지 확인하기 위한 핵심 필드
+        if (
+            "allowed_actions" in value
+            and "response_format" in value
+            and "observed_processes" in value
+        ):
+            candidates.append(value)
+
+    if not candidates:
+        raise RuntimeError(
+            f"valid LLM prompt JSON object not found: {path}"
+        )
+
+    print(
+        "[groq-retry] prompt JSON blocks found: "
+        f"{len(candidates)}; using latest block"
+    )
+
+    return candidates[-1]
 
 
 def save_json(path, data):
