@@ -165,6 +165,12 @@ def main():
     parser.add_argument("--timeout", type=int, default=240)
 
     parser.add_argument(
+        "--allow-invalid-baseline",
+        action="store_true",
+        help="continue candidate verification when baseline policy is already invalid",
+    )
+
+    parser.add_argument(
         "--min-improvement",
         type=float,
         default=0.0,
@@ -207,7 +213,12 @@ def main():
         out_dir,
     )
 
-    if not before_verifier.get("hard_verifier_passed", False):
+    baseline_passed = before_verifier.get(
+        "hard_verifier_passed",
+        False,
+    )
+
+    if not baseline_passed and not args.allow_invalid_baseline:
         decision = "ABORT_BASELINE_INVALID"
         reason = (
             "baseline policy failed hard verifier: "
@@ -237,6 +248,11 @@ def main():
 
         raise SystemExit(1)
 
+    if not baseline_passed:
+        print()
+        print("[quota-runner] baseline hard verifier: FAIL")
+        print("[quota-runner] recovery mode: candidate verification continues")
+
     print()
     print("[quota-runner] collect candidate workload")
     candidate_log, candidate_transcript = collect_workload(
@@ -258,11 +274,30 @@ def main():
     before_value = float(before_score["score"])
     candidate_value = float(candidate_score["score"])
 
-    if not candidate_verifier.get("hard_verifier_passed", False):
-        decision = "ROLLBACK"
+    candidate_passed = candidate_verifier.get(
+        "hard_verifier_passed",
+        False,
+    )
+
+    if not candidate_passed:
+        if baseline_passed:
+            decision = "ROLLBACK"
+            reason = (
+                "candidate policy failed hard verifier: "
+                + format_errors(candidate_verifier)
+            )
+        else:
+            decision = "REJECT_RECOVERY_CANDIDATE"
+            reason = (
+                "candidate policy also failed hard verifier: "
+                + format_errors(candidate_verifier)
+            )
+
+    elif not baseline_passed:
+        decision = "ACCEPT_RECOVERY"
         reason = (
-            "candidate policy failed hard verifier: "
-            + format_errors(candidate_verifier)
+            "candidate recovered from an invalid baseline and "
+            f"passed hard verifier: candidate={candidate_value}"
         )
 
     elif candidate_value <= before_value + args.min_improvement:
