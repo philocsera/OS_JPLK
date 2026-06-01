@@ -100,7 +100,42 @@ def analyze_snapshot(snapshot, state):
             "log_only",
         ))
 
-    for p in snapshot.get("processes", []):
+    processes = snapshot.get("processes", [])
+    current_keys = {
+        f"{p.get('pid')}:{p.get('name', '')}"
+        for p in processes
+    }
+
+    # 이전 snapshot에 있던 quota 관리 프로세스가 사라졌는지 확인
+    for key, prev in list(state.items()):
+        if key.startswith("_") or not isinstance(prev, dict):
+            continue
+
+        prev_quota = int(prev.get("quota", 0))
+
+        if prev_quota <= 0 or key in current_keys:
+            continue
+
+        if prev.get("disappearance_reported", False):
+            continue
+
+        prev_pid = prev.get("pid", 0)
+        prev_name = prev.get("name", "")
+        prev_sz = int(prev.get("sz", 0))
+
+        results.append((
+            prev_pid,
+            prev_name,
+            "DANGER",
+            f"managed_process_disappeared "
+            f"previous_sz={prev_sz} "
+            f"previous_quota={prev_quota}",
+            "send_to_llm",
+        ))
+
+        prev["disappearance_reported"] = True
+
+    for p in processes:
         pid = p.get("pid")
         name = p.get("name", "")
         sz = int(p.get("sz", 0))
@@ -166,6 +201,7 @@ def analyze_snapshot(snapshot, state):
             "swap_cycle_count": swap_cycle_count,
             "swap_activity_age": swap_activity_age,
             "thrashing_suspected": thrashing_suspected,
+            "disappearance_reported": False,
         }
 
         snapshot.setdefault("_bridge_process_metrics", {})[key] = state[key]
