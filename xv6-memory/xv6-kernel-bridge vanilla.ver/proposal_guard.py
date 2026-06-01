@@ -85,6 +85,11 @@ def validate_proposal(proposal, state):
     if proc is None:
         return [f"target pid not found: {target_pid}"]
 
+    if proc.get("disappearance_reported", False):
+        return [
+            f"target process is no longer present: pid={target_pid}"
+        ]
+
     name = proc.get("name", "")
     current_sz = int(proc.get("sz", 0))
     current_quota = int(proc.get("quota", 0))
