@@ -20,6 +20,8 @@ BAD_TRANSCRIPT_PATTERNS = {
     "usertrap(): unexpected",
 }
 
+QUOTA_DENIED_PATTERN = "[quota denied]"
+
 
 def load_snapshots(path):
     snapshots = []
@@ -139,11 +141,12 @@ def verify(snapshots, require_swap_activity):
     return checks, errors
 
 
-def verify_transcript(path):
+def verify_transcript(path, fail_on_quota_denied=False):
     if not path:
         return {
             "checked": False,
             "fatal_patterns": [],
+        "quota_denied": False,
         }, []
 
     text = Path(path).read_text(
@@ -162,9 +165,16 @@ def verify_transcript(path):
         for pattern in hits
     ]
 
+    quota_denied = QUOTA_DENIED_PATTERN in text
+    if fail_on_quota_denied and quota_denied:
+        errors.append(
+            f"transcript contains quota denial: {QUOTA_DENIED_PATTERN}"
+        )
+
     return {
         "checked": True,
         "fatal_patterns": hits,
+        "quota_denied": quota_denied,
     }, errors
 
 
@@ -173,6 +183,11 @@ def main():
     parser.add_argument("--log", required=True)
     parser.add_argument("--require-swap-activity", action="store_true")
     parser.add_argument("--transcript")
+    parser.add_argument(
+        "--fail-on-quota-denied",
+        action="store_true",
+        help="treat a quota denial in the transcript as policy verification failure",
+    )
     parser.add_argument(
         "--out",
         default="logs/hard_verifier_result.json",
@@ -187,7 +202,8 @@ def main():
     )
 
     transcript_checks, transcript_errors = verify_transcript(
-        args.transcript
+        args.transcript,
+        args.fail_on_quota_denied,
     )
 
     errors = parse_errors + verify_errors + transcript_errors
