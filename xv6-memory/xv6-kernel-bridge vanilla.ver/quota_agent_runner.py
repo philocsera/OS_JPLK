@@ -43,6 +43,13 @@ def main():
     parser.add_argument("--proposal", required=True)
     parser.add_argument("--before-quota", type=int, required=True)
     parser.add_argument("--approve", action="store_true")
+    parser.add_argument(
+        "--runtime",
+        action="store_true",
+        help="apply quota to the same live xv6 process and rollback when needed",
+    )
+    parser.add_argument("--pages", type=int, default=32)
+    parser.add_argument("--delay", type=int, default=1000)
     parser.add_argument("--step", type=int, default=4096)
     parser.add_argument("--procs", type=int, default=1)
     parser.add_argument("--ticks", type=int, default=30)
@@ -90,31 +97,61 @@ def main():
         return
 
     print()
-    print("[quota-agent] stage 2: verify approved candidate quota")
 
-    runner_command = [
-        sys.executable,
-        "quota_policy_runner.py",
-        "--before-quota",
-        str(args.before_quota),
-        "--candidate-quota",
-        str(candidate_quota),
-        "--step",
-        str(args.step),
-        "--procs",
-        str(args.procs),
-        "--ticks",
-        str(args.ticks),
-        "--interval",
-        str(args.interval),
-        "--timeout",
-        str(args.timeout),
-        "--out-dir",
-        str(out_dir / "verification"),
-    ]
+    if args.runtime:
+        print("[quota-agent] stage 2: execute live runtime quota scenario")
 
-    if proposal["action"] == "increase_quota":
-        runner_command.append("--allow-invalid-baseline")
+        runner_command = [
+            sys.executable,
+            "execute_quota_runtime_scenario.py",
+            "--before-quota",
+            str(args.before_quota),
+            "--candidate-quota",
+            str(candidate_quota),
+            "--pages",
+            str(args.pages),
+            "--delay",
+            str(args.delay),
+            "--ticks",
+            str(args.ticks),
+            "--interval",
+            str(args.interval),
+            "--timeout",
+            str(args.timeout),
+            "--out-dir",
+            str(out_dir / "runtime"),
+        ]
+
+        summary_path = out_dir / "runtime" / "summary.json"
+
+    else:
+        print("[quota-agent] stage 2: verify approved candidate quota")
+
+        runner_command = [
+            sys.executable,
+            "quota_policy_runner.py",
+            "--before-quota",
+            str(args.before_quota),
+            "--candidate-quota",
+            str(candidate_quota),
+            "--step",
+            str(args.step),
+            "--procs",
+            str(args.procs),
+            "--ticks",
+            str(args.ticks),
+            "--interval",
+            str(args.interval),
+            "--timeout",
+            str(args.timeout),
+            "--out-dir",
+            str(out_dir / "verification"),
+        ]
+
+        if proposal["action"] == "increase_quota":
+            runner_command.append("--allow-invalid-baseline")
+
+        summary_path = out_dir / "verification" / "summary.json"
 
     exit_code = run(runner_command)
 
@@ -124,7 +161,6 @@ def main():
             f"with exit code {exit_code}"
         )
 
-    summary_path = out_dir / "verification" / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     decision = summary.get("decision", "UNKNOWN")
 
@@ -134,6 +170,7 @@ def main():
         "ACCEPT_RECOVERY": "RECOVERY_ACCEPTED",
         "REJECT_RECOVERY_CANDIDATE": "RECOVERY_CANDIDATE_REJECTED",
         "ABORT_BASELINE_INVALID": "BASELINE_INVALID",
+        "ROLLBACK_APPLIED": "RUNTIME_ROLLBACK_APPLIED",
     }
 
     result = result_map.get(decision, "VERIFICATION_COMPLETE")
@@ -146,6 +183,10 @@ def main():
     rollback_quota = summary.get("rollback_quota")
     if rollback_quota is not None:
         print(f"[quota-agent] rollback target quota: {rollback_quota}")
+
+    final_quota = summary.get("final_quota")
+    if final_quota is not None:
+        print(f"[quota-agent] final quota: {final_quota}")
 
     print(f"[quota-agent] summary: {summary_path}")
 
