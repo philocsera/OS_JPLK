@@ -124,13 +124,30 @@ def main():
             f"with exit code {exit_code}"
         )
 
+    summary_path = out_dir / "verification" / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    decision = summary.get("decision", "UNKNOWN")
+
+    result_map = {
+        "ACCEPT": "POLICY_ACCEPTED",
+        "ROLLBACK": "POLICY_ROLLBACK_REQUIRED",
+        "ACCEPT_RECOVERY": "RECOVERY_ACCEPTED",
+        "REJECT_RECOVERY_CANDIDATE": "RECOVERY_CANDIDATE_REJECTED",
+        "ABORT_BASELINE_INVALID": "BASELINE_INVALID",
+    }
+
+    result = result_map.get(decision, "VERIFICATION_COMPLETE")
+
     print()
-    print("[quota-agent] result: VERIFICATION_COMPLETE")
+    print(f"[quota-agent] result: {result}")
+    print(f"[quota-agent] decision: {decision}")
     print(f"[quota-agent] candidate quota: {candidate_quota}")
-    print(
-        "[quota-agent] summary: "
-        f"{out_dir / 'verification' / 'summary.json'}"
-    )
+
+    rollback_quota = summary.get("rollback_quota")
+    if rollback_quota is not None:
+        print(f"[quota-agent] rollback target quota: {rollback_quota}")
+
+    print(f"[quota-agent] summary: {summary_path}")
 
 
 if __name__ == "__main__":
