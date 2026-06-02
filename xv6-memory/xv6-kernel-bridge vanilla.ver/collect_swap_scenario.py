@@ -57,12 +57,7 @@ def stop_qemu(child):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pages", type=int, default=8)
-    parser.add_argument(
-        "--swapout-pages",
-        type=int,
-        default=4,
-        help="pages to swap out; 0 skips swapctl (baseline: memhold+memwatch only)",
-    )
+    parser.add_argument("--swapout-pages", type=int, default=4)
     parser.add_argument("--delay", type=int, default=1000)
     parser.add_argument("--ticks", type=int, default=20)
     parser.add_argument("--interval", type=int, default=100)
@@ -80,8 +75,8 @@ def main():
     if args.pages <= 0:
         raise SystemExit("[scenario] ERROR: pages must be positive")
 
-    if args.swapout_pages < 0:
-        raise SystemExit("[scenario] ERROR: swapout-pages must be non-negative")
+    if args.swapout_pages <= 0:
+        raise SystemExit("[scenario] ERROR: swapout-pages must be positive")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -119,31 +114,25 @@ def main():
         target_pid = int(child.match.group(1))
         print(f"[scenario] detected memhold pid: {target_pid}")
 
-        if args.swapout_pages > 0:
-            swapctl_command = (
-                f"swapctl {target_pid} {args.swapout_pages}"
-            )
+        swapctl_command = (
+            f"swapctl {target_pid} {args.swapout_pages}"
+        )
 
-            print(f"[scenario] xv6 command: {swapctl_command}")
-            child.sendline(swapctl_command)
+        print(f"[scenario] xv6 command: {swapctl_command}")
+        child.sendline(swapctl_command)
 
-            child.expect(
-                rf"swapctl pid={target_pid} "
-                rf"requested={args.swapout_pages} "
-                rf"success=(\d+)"
-            )
+        child.expect(
+            rf"swapctl pid={target_pid} "
+            rf"requested={args.swapout_pages} "
+            rf"success=(\d+)"
+        )
 
-            success = int(child.match.group(1))
+        success = int(child.match.group(1))
 
-            if success <= 0:
-                raise RuntimeError("swapctl did not swap out any page")
+        if success <= 0:
+            raise RuntimeError("swapctl did not swap out any page")
 
-            child.expect_exact("$ ")
-        else:
-            # baseline: swapout 미실행. memhold 만 띄운 채 바로 memwatch 로 진행한다.
-            # baseline/candidate 가 swapout 유무만 다르고 나머지(memhold/ticks/interval)는
-            # 동일해야 공정 비교가 된다.
-            print("[scenario] swapout-pages=0: skipping swapctl (baseline)")
+        child.expect_exact("$ ")
 
         memwatch_command = (
             f"memwatch json {args.ticks} {args.interval}"
