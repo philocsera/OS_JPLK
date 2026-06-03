@@ -7,7 +7,7 @@
 // 디스크 레이아웃 (SWAPDEV=2, virtio 두 번째 디스크):
 //   slot i 는 디스크 블록 [i*BLOCKS_PER_PAGE .. (i+1)*BLOCKS_PER_PAGE) 에 저장
 //   BLOCKS_PER_PAGE = PGSIZE / BSIZE = 4096 / 1024 = 8
-//   NSWAP=1024 슬롯 → 1024 * 4KB = 4MB swap area
+//   NSWAP=16384 슬롯 → 16384 * 4KB = 64MB swap area (Makefile swap.img dd count=64와 일치 필수)
 //
 // PTE 인코딩:
 //   swap된 PTE:  V=0,  U=1,  PPN자리 = swap slot 번호
@@ -27,7 +27,7 @@
 // ============================================================
 
 // ---------- swap slot pool 설정 ----------
-#define NSWAP            1024             // 슬롯 개수 (= 4MB swap area)
+#define NSWAP            16384            // 슬롯 개수 (= 64MB swap area; Makefile dd count=64와 일치)
 #define SWAPDEV          2                // virtio 두 번째 디스크
 #define BLOCKS_PER_PAGE  (PGSIZE / BSIZE) // 페이지당 디스크 블록 수
 

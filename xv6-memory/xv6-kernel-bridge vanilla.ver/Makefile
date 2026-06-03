@@ -153,6 +153,7 @@ UPROGS=\
 	$U/_memwatch\
 	$U/_setquota\
 	$U/_memhold\
+	$U/_memfill\
 	$U/_swapctl\
 	$U/_swaptest\
 
@@ -160,7 +161,7 @@ fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
 
 swap.img:
-	dd if=/dev/zero of=swap.img bs=1M count=4
+	dd if=/dev/zero of=swap.img bs=1M count=64
 
 -include kernel/*.d user/*.d
 
