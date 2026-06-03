@@ -172,9 +172,12 @@ is_protected_proc(struct proc *p)
 // --- victim 선택: 단순 (첫 user page) ---
 //
 // 조건:
-//   - PTE 존재 && V=1 && U=1
+//   - PTE 존재 && V=1 && U=1 && W=1
 //   - lazy(*pte==0) / 이미 swap된 페이지 / 손상된 PTE / 커널 페이지 제외
 //   - va==0은 코드 시작점이라 회피
+//   - ★ W=0(읽기전용 코드/text) 제외: swapin은 권한을 R|W|U로만 복구하고 X bit를
+//     복원하지 못한다(기능 한계). 코드 페이지를 swap하면 재실행 시 instruction
+//     page fault → usertrap kill. 따라서 쓰기가능(데이터/힙/스택) 페이지만 victim.
 static int
 select_victim_simple(struct proc *p, uint64 *va_out, pte_t **pte_out)
 {
@@ -188,6 +191,7 @@ select_victim_simple(struct proc *p, uint64 *va_out, pte_t **pte_out)
     if(IS_SWAPPED(*pte))    continue;    // 이미 swap됨
     if((*pte & PTE_V) == 0) continue;    // 손상된 PTE
     if((*pte & PTE_U) == 0) continue;    // 커널 페이지
+    if((*pte & PTE_W) == 0) continue;    // 읽기전용 코드 페이지 회피(X bit 복원 불가)
     if(va == 0)             continue;    // 코드 시작점 회피
 
     *va_out = va;
@@ -222,6 +226,7 @@ select_victim_clock(struct proc *p, uint64 *va_out, pte_t **pte_out)
                    && !IS_SWAPPED(*pte)
                    && ((*pte & PTE_V) != 0)
                    && ((*pte & PTE_U) != 0)
+                   && ((*pte & PTE_W) != 0)   // 읽기전용 코드 회피(X bit 복원 불가)
                    && (va != 0);
 
     if(eligible){
@@ -318,9 +323,22 @@ swapout_one_page(struct proc *p)
 
   // Phase 3: PTE 변경 (p->lock 재보유)
   acquire(&p->lock);
+
+  // ★ Phase 2(락-free 디스크 I/O) 동안 대상 proc 이 exit→reap(freeproc) 되어
+  //   p->pagetable 이 해제(0)됐을 수 있다. freeproc 은 p->lock 을 잡고 도므로
+  //   여기 acquire 는 freeproc 완료 후를 보장 → pagetable/state 로 죽음을 감지한다.
+  //   이 검사 없이 walk(p->pagetable) 하면 walk(NULL) → NULL deref → panic:kerneltrap.
+  //   죽었으면 슬롯만 회수(누수 방지)하고 탈출. 이 페이지(pa)는 freeproc 의 uvmunmap
+  //   이 이미 kfree 했으므로 여기서 kfree 하면 double free → Phase 4 도달 전에 return.
+  if(p->pagetable == 0 || p->state == UNUSED || p->state == ZOMBIE){
+    release(&p->lock);
+    swap_free_slot(slot);
+    return -1;
+  }
+
   pte_t *pte2 = walk(p->pagetable, va, 0);
   if(pte2 == 0 || !(*pte2 & PTE_V) || PTE2PA(*pte2) != pa){
-    // I/O 중 프로세스 상태 변경 — 중단
+    // I/O 중 프로세스 상태 변경(또는 proc 재사용) — 중단
     release(&p->lock);
     swap_free_slot(slot);
     return -1;

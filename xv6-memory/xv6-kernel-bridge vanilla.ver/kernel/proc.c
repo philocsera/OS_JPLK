@@ -253,30 +253,57 @@ growproc(int n)
   uint64 sz;
   struct proc *p = myproc();
 
-  sz = p->sz;
-
   if(n > 0){
+    // 성장 경로: quota 검사 + uvmalloc + p->sz 갱신을 모두 p->lock 안에서.
+    // (다른 proc 의 swapout 도 이 proc 의 p->lock 아래 동작 → 동일 락 직렬화)
+    acquire(&p->lock);
+    sz = p->sz;
+
+    // ── quota 를 resident(물리 RAM 점유) 기준으로 검사 ──
+    // swap 으로 디스크에 나간 페이지는 RAM 을 안 쓰므로 quota 에서 제외한다:
+    //   outstanding = swapout_count - swapin_count  (이 proc 의 순 swap 페이지)
+    //   resident    = sz - outstanding*PGSIZE       (현재 RAM 점유, bytes)
+    // → swapout 이 resident 를 줄여 quota 여유를 만든다. memfill 이 sz 는 target 까지
+    //   키우되 resident 는 quota 이하로 유지 → 헤드룸 보존하며 완주(quota+swap 협력).
+    // ★ swapout_count 는 swapout(다른 proc)이 이 proc 의 p->lock 아래서 쓰므로
+    //   (swap.c:337) 일관 읽기를 위해 이 검사를 p->lock 안에서 한다.
+    // ★ 하위호환: swap 없으면 outstanding=0 → resident=sz → 기존 sz 기준과 동일.
     if(p->mem_quota > 0){
-      if(sz >= p->mem_quota || (uint64)n > p->mem_quota - sz){
+      uint64 outstanding = (p->swapout_count > p->swapin_count)
+                           ? (p->swapout_count - p->swapin_count) : 0;
+      uint64 swapped = outstanding * PGSIZE;
+      uint64 resident = (sz > swapped) ? (sz - swapped) : 0;   // 음수 방지 클램프
+      if(resident >= p->mem_quota || (uint64)n > p->mem_quota - resident){
         p->quota_denied_count++;
-        printf("[quota denied] pid=%d name=%s sz=%d request=%d quota=%d\n",
+        release(&p->lock);            // 콘솔 출력은 락 밖에서(보유시간↓·콘솔락 중첩 회피)
+        printf("[quota denied] pid=%d name=%s sz=%d request=%d quota=%d resident=%d\n",
           p->pid,
           p->name,
           (int)sz,
           n,
-          (int)p->mem_quota);
+          (int)p->mem_quota,
+          (int)resident);
         return -1;
       }
     }
 
-    if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
+    // pagetable 변경(uvmalloc) + p->sz 갱신. swapout 과 동일 락에서 직렬화:
+    //   uvmalloc/mappages/walk/kalloc 은 sleep 안 함 → 스핀락 보유 안전.
+    //   락 순서 p->lock → kmem.lock 뿐, 역순 경로 없음 → 데드락 없음.
+    //   실패 시 uvmalloc 내부 rollback 도 같은 락 아래, p->sz 는 옛값 유지.
+    sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W);
+    if(sz != 0)
+      p->sz = sz;
+    release(&p->lock);
+    if(sz == 0)
       return -1;
-    }
   } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
+    acquire(&p->lock);
+    sz = uvmdealloc(p->pagetable, p->sz, p->sz + n);
+    p->sz = sz;
+    release(&p->lock);
   }
 
-  p->sz = sz;
   return 0;
 }
 // Create a new process, copying the parent.
