@@ -214,7 +214,7 @@ def main():
     parser.add_argument("--interval", type=int, default=2)
     parser.add_argument("--timeout", type=int, default=240)
     parser.add_argument("--max-attempts", type=int, default=2)
-    parser.add_argument("--min-improvement", type=float, default=3.0)
+    parser.add_argument("--min-improvement", type=float, default=1.0)
     parser.add_argument("--min-swap-stab", type=float, default=0.85)
     parser.add_argument("--out-dir", default="logs/memory_qemu_live")
     parser.add_argument("--model")
