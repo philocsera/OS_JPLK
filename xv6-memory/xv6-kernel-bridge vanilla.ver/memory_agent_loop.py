@@ -43,6 +43,11 @@ ACTION_KO = {
     "swapout": "swapout",
 }
 
+PRESSURE_KO = {
+    "normal": "정상",
+    "high": "높음",
+}
+
 
 def quiet(function, *args, **kwargs):
     with contextlib.redirect_stdout(io.StringIO()):
@@ -73,7 +78,31 @@ def find_process(lines, pid):
     return None
 
 
+def refresh_user_syscall_stubs():
+    root = Path(__file__).resolve().parent
+
+    generated_files = [
+        "user/usys.S",
+        "user/usys.o",
+        "user/_swapctl",
+        "user/_setquota",
+        "mkfs/mkfs",
+    ]
+
+    for relative_path in generated_files:
+        path = root / relative_path
+        path.unlink(missing_ok=True)
+
+
 def start_qemu(timeout, transcript_path):
+    print(
+        "[Agent] QEMU 환경 준비 중... "
+        "필요하면 커널을 재빌드합니다.",
+        flush=True,
+    )
+
+    refresh_user_syscall_stubs()
+
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
 
     transcript_file = transcript_path.open(
@@ -90,6 +119,8 @@ def start_qemu(timeout, transcript_path):
 
     child.logfile = transcript_file
     child.expect_exact("$ ", timeout=timeout)
+
+    print("[Agent] QEMU 준비 완료", flush=True)
 
     return child, transcript_file
 
@@ -168,6 +199,29 @@ def run_pipeline(snapshot_log, prompt_log, pipeline_log, reset):
         return None
 
     return build_memory_policy_prompt(prompt_log)
+
+
+def add_memory_pressure_context(prompt, pressure_mode):
+    detected = pressure_mode == "high"
+
+    prompt["global_memory_pressure"] = {
+        "detected": detected,
+        "level": pressure_mode,
+        "source": "experiment_input",
+        "description": (
+            "MVP experiment input. Replace this with a kernel "
+            "free_pages-based observation in the next stage."
+        ),
+    }
+
+    prompt["policy_selection_rule"] = (
+        "If global_memory_pressure.detected is true, prefer a "
+        "conservative swapout candidate before increasing quota when "
+        "the target is not protected and thrashing is not suspected. "
+        "If it is false, do not select swapout without evidence."
+    )
+
+    return prompt
 
 
 def request_llm(prompt, prompt_path, proposal_path, args):
@@ -304,10 +358,15 @@ def print_normal(cycle):
     print("처리 결과   : 다음 감시 주기로 이동")
 
 
-def print_detection(cycle, proposal):
+def print_detection(cycle, proposal, pressure_mode):
     print()
     print(f"[관찰 {cycle:02d}] 이상 감지")
     print(f"대상 PID    : {proposal.get('target_pid', '-')}")
+    print(
+        "RAM 압박 신호: "
+        + PRESSURE_KO.get(pressure_mode, pressure_mode)
+        + " (실험 입력)"
+    )
     print(
         "LLM 분석    : "
         + proposal.get(
@@ -357,6 +416,17 @@ def main():
     parser.add_argument("--baseline-headroom-pages", type=int, default=1)
     parser.add_argument("--min-improvement", type=float, default=1.0)
     parser.add_argument("--min-swap-stab", type=float, default=0.85)
+
+    parser.add_argument(
+        "--pressure-mode",
+        choices=["normal", "high"],
+        default="normal",
+        help=(
+            "실험용 RAM 압박 입력입니다. 정책을 강제하지 않고 "
+            "LLM Prompt에 환경 상태만 전달합니다."
+        ),
+    )
+
     parser.add_argument("--approve", action="store_true")
     parser.add_argument("--model")
 
@@ -389,6 +459,7 @@ def main():
 
     summary = {
         "result": "RUNNING",
+        "pressure_mode": args.pressure_mode,
         "observations": [],
         "qemu_restarts": 0,
     }
@@ -466,6 +537,11 @@ def main():
             if retry_context:
                 prompt["retry_context"] = retry_context
 
+            prompt = add_memory_pressure_context(
+                prompt,
+                args.pressure_mode,
+            )
+
             process = find_process(lines, pid)
 
             if process is None:
@@ -490,7 +566,11 @@ def main():
                     args,
                 )
 
-            print_detection(cycle, proposal)
+            print_detection(
+                cycle,
+                proposal,
+                args.pressure_mode,
+            )
 
             action = proposal.get("action")
             proposal_pid = int(proposal.get("target_pid", 0) or 0)
