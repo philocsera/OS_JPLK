@@ -1,0 +1,9 @@
+{
+  "6:memstress": {
+    "pid": 6,
+    "name": "memstress",
+    "sz": 49152,
+    "quota": 65536,
+    "usage": 75
+  }
+}
