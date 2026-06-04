@@ -82,10 +82,17 @@ def build_memory_policy_prompt(prompt_log):
         }
 
     prompt["policy_mode"] = "integrated_memory_policy_selection"
+    prompt["output_language"] = (
+        "Write diagnosis and reason in concise Korean. "
+        "Keep action names and numeric values unchanged."
+    )
 
     response_format = prompt.setdefault("response_format", {})
     response_format["diagnosis"] = (
-        "short diagnosis of the detected memory problem"
+        "detected memory problem summarized briefly in Korean"
+    )
+    response_format["reason"] = (
+        "policy selection rationale summarized briefly in Korean"
     )
 
     prompt["available_runtime_policies"] = [
