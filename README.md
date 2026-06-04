@@ -6,7 +6,7 @@
 - **`xv6-memory/`** — **swap + 메모리 quota** 서브시스템
 - 두 갈래를 단일 커널로 합치는 작업이 진행 중이며, 통합 설계는
   [`integration_plan.md`](report/week14/조현성/integration_plan.md), 통합 깊이 논의는
-  [`discuss.md`](./discuss.md) 에 정리돼 있다.
+  [`discuss.md`](report/week14/조현성/discuss.md) 에 정리돼 있다.
 
 문서 구성:
 - **Part 1** — 통합 깊이 논의 (discuss.md 요약)
@@ -17,7 +17,7 @@
 
 # Part 1 — 통합 깊이 논의 (Coexistence → Observation → Control)
 
-> 출처: [`discuss.md`](./discuss.md). 통합 산출물 위치는 신규 `xv6-unified/` 디렉터리로 확정(Q1).
+> 출처: [`discuss.md`](report/week14/조현성/discuss.md). 통합 산출물 위치는 신규 `xv6-unified/` 디렉터리로 확정(Q1).
 > 아래 통합 깊이(Q4)·파이썬 툴링(Q5)은 **미결정**이며 이 문서는 선택지를 기록한다.
 
 ## 전제 — 지금 두 서브시스템은 완전히 독립이다
