@@ -18,6 +18,8 @@ BAD_TRANSCRIPT_PATTERNS = {
     "panic:",
     "kerneltrap",
     "usertrap(): unexpected",
+    "memhold: pattern mismatch",
+    "memfill: pattern mismatch",
 }
 
 QUOTA_DENIED_PATTERN = "[quota denied]"
@@ -58,10 +60,24 @@ def load_snapshots(path):
     return snapshots, errors
 
 
-def verify(snapshots, require_swap_activity):
+def verify(
+    snapshots,
+    require_swap_activity,
+    require_swapout_activity=False,
+    require_swapin_activity=False,
+    target_pid=None,
+):
     errors = []
     saw_swapout = False
     saw_swapin = False
+
+    require_swapout = (
+        require_swap_activity or require_swapout_activity
+    )
+
+    require_swapin = (
+        require_swap_activity or require_swapin_activity
+    )
 
     for snapshot in snapshots:
         tick = snapshot.get("tick", "?")
@@ -118,11 +134,26 @@ def verify(snapshots, require_swap_activity):
         ):
             errors.append(f"tick={tick}: memwatch missing")
 
-    if require_swap_activity and not saw_swapout:
+    if require_swapout and not saw_swapout:
         errors.append("swapout was not observed")
 
-    if require_swap_activity and not saw_swapin:
+    if require_swapin and not saw_swapin:
         errors.append("swapin was not observed")
+
+    target_process_alive = True
+
+    if target_pid is not None:
+        target_process_alive = False
+
+        if snapshots:
+            final_processes = snapshots[-1].get("processes", [])
+            target_process_alive = any(
+                int(proc.get("pid", -1)) == target_pid
+                for proc in final_processes
+            )
+
+        if not target_process_alive:
+            errors.append(f"final snapshot: target pid={target_pid} missing")
 
     checks = {
         "snapshot_count": len(snapshots),
@@ -134,6 +165,7 @@ def verify(snapshots, require_swap_activity):
             "memwatch missing" in error
             for error in errors
         ),
+        "target_process_alive": target_process_alive,
         "swapout_observed": saw_swapout,
         "swapin_observed": saw_swapin,
     }
@@ -181,8 +213,27 @@ def verify_transcript(path, fail_on_quota_denied=False):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--log", required=True)
-    parser.add_argument("--require-swap-activity", action="store_true")
+    parser.add_argument(
+        "--require-swap-activity",
+        action="store_true",
+        help="legacy mode: require both swapout and swapin",
+    )
+    parser.add_argument(
+        "--require-swapout-activity",
+        action="store_true",
+        help="require at least one observed swapout",
+    )
+    parser.add_argument(
+        "--require-swapin-activity",
+        action="store_true",
+        help="require at least one observed swapin",
+    )
     parser.add_argument("--transcript")
+    parser.add_argument(
+        "--target-pid",
+        type=int,
+        help="optionally require the target process to exist in the final snapshot",
+    )
     parser.add_argument(
         "--fail-on-quota-denied",
         action="store_true",
@@ -199,6 +250,9 @@ def main():
     checks, verify_errors = verify(
         snapshots,
         args.require_swap_activity,
+        args.require_swapout_activity,
+        args.require_swapin_activity,
+        args.target_pid,
     )
 
     transcript_checks, transcript_errors = verify_transcript(
@@ -239,8 +293,16 @@ def main():
     print("[hard-verifier] protected processes: alive")
     print("[hard-verifier] memwatch: available")
 
-    if args.require_swap_activity:
+    if (
+        args.require_swap_activity
+        or args.require_swapout_activity
+    ):
         print("[hard-verifier] swapout: observed")
+
+    if (
+        args.require_swap_activity
+        or args.require_swapin_activity
+    ):
         print("[hard-verifier] swapin: observed")
 
     print(f"[hard-verifier] result saved: {out_path}")
