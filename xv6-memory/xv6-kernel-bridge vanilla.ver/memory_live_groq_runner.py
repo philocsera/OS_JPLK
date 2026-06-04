@@ -53,6 +53,7 @@ def normalize_proposal(proposal):
     proposal.setdefault("target_quota", None)
     proposal.setdefault("swapout_pages", None)
     proposal.setdefault("reason", "")
+    proposal.setdefault("diagnosis", proposal.get("reason", ""))
     proposal.setdefault("confidence", "low")
 
     if proposal["action"] not in POLICY_ACTIONS:
@@ -81,6 +82,11 @@ def build_memory_policy_prompt(prompt_log):
         }
 
     prompt["policy_mode"] = "integrated_memory_policy_selection"
+
+    response_format = prompt.setdefault("response_format", {})
+    response_format["diagnosis"] = (
+        "short diagnosis of the detected memory problem"
+    )
 
     prompt["available_runtime_policies"] = [
         {
