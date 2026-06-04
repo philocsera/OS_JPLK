@@ -53,6 +53,7 @@ def normalize_proposal(proposal):
     proposal.setdefault("target_quota", None)
     proposal.setdefault("swapout_pages", None)
     proposal.setdefault("reason", "")
+    proposal.setdefault("diagnosis", proposal.get("reason", ""))
     proposal.setdefault("confidence", "low")
 
     if proposal["action"] not in POLICY_ACTIONS:
@@ -81,6 +82,18 @@ def build_memory_policy_prompt(prompt_log):
         }
 
     prompt["policy_mode"] = "integrated_memory_policy_selection"
+    prompt["output_language"] = (
+        "Write diagnosis and reason in concise Korean. "
+        "Keep action names and numeric values unchanged."
+    )
+
+    response_format = prompt.setdefault("response_format", {})
+    response_format["diagnosis"] = (
+        "detected memory problem summarized briefly in Korean"
+    )
+    response_format["reason"] = (
+        "policy selection rationale summarized briefly in Korean"
+    )
 
     prompt["available_runtime_policies"] = [
         {

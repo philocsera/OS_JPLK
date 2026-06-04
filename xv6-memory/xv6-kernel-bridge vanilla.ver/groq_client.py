@@ -33,6 +33,9 @@ PROPOSAL_SCHEMA = {
         "swapout_pages": {
             "type": ["integer", "null"],
         },
+        "diagnosis": {
+            "type": "string",
+        },
         "reason": {
             "type": "string",
         },
@@ -50,6 +53,7 @@ PROPOSAL_SCHEMA = {
         "target_pid",
         "target_quota",
         "swapout_pages",
+        "diagnosis",
         "reason",
         "confidence",
     ],
