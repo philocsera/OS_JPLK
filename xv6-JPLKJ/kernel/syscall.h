@@ -1,0 +1,43 @@
+// System call numbers
+#define SYS_fork    1
+#define SYS_exit    2
+#define SYS_wait    3
+#define SYS_pipe    4
+#define SYS_read    5
+#define SYS_kill    6
+#define SYS_exec    7
+#define SYS_fstat   8
+#define SYS_chdir   9
+#define SYS_dup    10
+#define SYS_getpid 11
+#define SYS_sbrk   12
+#define SYS_pause  13
+#define SYS_uptime 14
+#define SYS_open   15
+#define SYS_write  16
+#define SYS_mknod  17
+#define SYS_unlink 18
+#define SYS_link   19
+#define SYS_mkdir  20
+#define SYS_close  21
+#define SYS_setpriority 22
+#define SYS_getpriority 23
+#define SYS_setclass    24
+#define SYS_setquantum  25
+#define SYS_getprocstat 26
+#define SYS_getprocstat_all 27
+#define SYS_getnamepriors 28
+#define SYS_setjob         29
+#define SYS_getjob         30
+#define SYS_setjobpriority 31
+#define SYS_setjobclass    32
+#define SYS_note           33
+#define SYS_crash          34
+#define SYS_setnamepriors  35
+// ----- memory subsystem syscalls (grafted in lv0 merge; renumbered from the
+//       memory tree's 25-28/22 to avoid colliding with the scheduler's 22-35) -----
+#define SYS_getmemstat     36
+#define SYS_setmemquota    37
+#define SYS_swapout        38
+#define SYS_getswapstat    39
+#define SYS_trace          40

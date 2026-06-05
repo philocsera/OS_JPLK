@@ -4,6 +4,14 @@ import json
 import os
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+    # .env는 이 스크립트와 같은 디렉토리(xv6-lv2) 기준으로 로드 (cwd 무관).
+    # 라이브 러너들은 groq_client.py를 서브프로세스로 부르므로 여기 한 곳이면 충분.
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+except ModuleNotFoundError:
+    pass
+
 from groq import Groq
 
 DEFAULT_MODEL = "openai/gpt-oss-120b"

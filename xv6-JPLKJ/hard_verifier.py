@@ -3,10 +3,10 @@ import argparse
 import json
 from pathlib import Path
 
-PROTECTED = {
-    1: "init",
-    2: "sh",
-}
+# lv2 적응: memory 전용 커널은 sh=pid2였지만, process 트리와 병합된 lv2에선 부팅 시
+# pid 슬롯 사용이 달라 sh=pid3가 된다. pid 하드코딩 대신 이름으로 보호 판정한다
+# (bridge.py의 PROTECTED_NAMES와 동일 의미, pid 배치 변화에 견고).
+PROTECTED_NAMES = {"init", "sh"}
 
 COUNT_FIELDS = {
     "quota_denied_count",
@@ -116,16 +116,13 @@ def verify(
             if int(proc.get("swapin_count", 0)) > 0:
                 saw_swapin = True
 
-        for pid, expected_name in PROTECTED.items():
-            proc = by_pid.get(pid)
-
-            if proc is None:
-                errors.append(f"tick={tick}: protected pid={pid} missing")
-                continue
-
-            if proc.get("name") != expected_name:
+        for expected_name in PROTECTED_NAMES:
+            if not any(
+                proc.get("name") == expected_name
+                for proc in processes
+            ):
                 errors.append(
-                    f"tick={tick}: pid={pid} expected name={expected_name}"
+                    f"tick={tick}: protected {expected_name} missing"
                 )
 
         if not any(
@@ -158,7 +155,7 @@ def verify(
     checks = {
         "snapshot_count": len(snapshots),
         "protected_processes_alive": not any(
-            "protected pid" in error
+            "protected " in error
             for error in errors
         ),
         "memwatch_available": not any(
