@@ -1,176 +1,223 @@
-# OS_22 — LLM 기반 xv6 통합 프로젝트
+# xv6-JPLKJ — LLM-Integrated xv6
 
-이 저장소는 vanilla xv6-riscv를 두 갈래로 확장한 뒤 하나로 합치는 프로젝트다.
+`xv6-JPLKJ/` is a single xv6-riscv kernel that merges two LLM-driven subsystems into
+one build: an **LLM advisor scheduler** (Part 3, process) and a **swap + memory-quota
+engine with an LLM policy pipeline** (Part 2, memory). Both run on the same kernel over
+three virtio-mmio devices.
 
-- **`xv6-process/`** — LLM 어드바이저 **스케줄러** (우선순위·클래스·job 그룹)
-- **`xv6-memory/`** — **swap + 메모리 quota** 서브시스템
-- 두 갈래를 단일 커널로 합치는 작업이 진행 중이며, 통합 설계는
-  [`integration_plan.md`](report/week14/조현성/integration_plan.md), 통합 깊이 논의는
-  [`discuss.md`](report/week14/조현성/discuss.md) 에 정리돼 있다.
-
-문서 구성:
-- **Part 1** — 통합 깊이 논의 (discuss.md 요약)
-- **Part 2** — xv6-memory 구현 내용
-- **Part 3** — xv6-process 구현 내용
+**Language / 언어:** [English](#english) · [한국어](#한국어)
 
 ---
 
-# Part 1 — 통합 깊이 논의 (Coexistence → Observation → Control)
+# English
 
-> 출처: [`discuss.md`](report/week14/조현성/discuss.md). 통합 산출물 위치는 신규 `xv6-unified/` 디렉터리로 확정(Q1).
-> 아래 통합 깊이(Q4)·파이썬 툴링(Q5)은 **미결정**이며 이 문서는 선택지를 기록한다.
+## Build & Run
 
-## 전제 — 지금 두 서브시스템은 완전히 독립이다
+```sh
+cd xv6-JPLKJ
 
-- process의 스케줄 advisor(`tools/bridge.py`)는 swap/quota를 **전혀 인지하지 않음**.
-- memory는 **자체 LLM 스택을 따로 보유**(`groq_client`, `hard_verifier`,
-  `proposal_guard`, `quota_*_runner`, `score_proto`).
-- 통합하면 **한 커널 안에 LLM 어드바이저가 둘** — 하나는 *스케줄링*, 하나는 *메모리 정책* 을 결정.
+# The default `make` builds only the kernel — name fs.img / swap.img explicitly.
+make TOOLPREFIX=riscv64-elf- kernel/kernel fs.img swap.img
 
-| 서브시스템 | 관측 syscall | 제어 syscall | LLM 백엔드 |
+# Boot in QEMU (three virtio-mmio devices: fs=bus.0, swap=bus.1, advisor console=bus.2)
+make qemu CPUS=1
+```
+
+Requires a RISC-V "newlib" toolchain and `riscv64-softmmu` QEMU
+(<https://pdos.csail.mit.edu/6.1810/>). `swap.img` is a 64 MB second virtio disk
+(`dd count=64`, must match `NSWAP`).
+
+**Optional — LLM pipelines** (the kernel boots and works without them):
+
+```sh
+# Part 3 — process advisor (local, no API key, offline after pull)
+brew install ollama && ollama pull qwen2.5:3b
+python3 tools/bridge.py                 # host bridge → Ollama → setclass
+
+# Part 2 — memory policy (Groq cloud)
+pip install groq python-dotenv pexpect
+echo 'GROQ_API_KEY=gsk_...' > .env       # read by groq_client.py via python-dotenv
+python3 memory_qemu_live_runner.py --approve   # full live loop: QEMU → bridge → Groq → verify
+```
+
+## Part 2 — Memory: swap + memory quota
+
+A swap subsystem and per-process memory quota added to the kernel, plus a host-side
+pipeline where an external LLM (Groq cloud) proposes and a verifier checks memory policy.
+
+**Kernel** (`kernel/swap.c`, `swap.h`)
+- **Swap** on a second virtio disk (`SWAPDEV=2`, `NSWAP=16384` slots × 4 KB). Victim
+  selection is simple (first user page) or **A-bit Clock** (`-DSWAP_VICTIM_CLOCK=1`).
+  Swapped PTE = `V=0, U=1, PPN←slot`; lazy page = `*pte==0`. Chain:
+  `swapout(pid)` → `select_victim` → `swap_write_slot` → `kfree`; reverse on fault:
+  `vmfault` → `swapin_page` → `swap_read_slot` → restore PTE.
+- **Quota** — `uvmalloc` blocks growth past `mem_quota` and counts `quota_denied_count`.
+- **Syscalls 36–40** — `getmemstat`(36), `setmemquota`(37), `swapout`(38),
+  `getswapstat`(39), `trace`(40). (Renumbered above the process subsystem's 22–35 to
+  avoid collision during the merge.)
+- `struct proc` fields: `mem_quota, quota_denied_count, trace_mask, swap_clock_hand,
+  swapout_count, swapin_count`.
+
+**Userspace:** `memstress, memfill, memhold, memwatch, memstat_test, setquota, swapctl,
+swaptest, trace_test`.
+
+**LLM policy pipeline (Groq cloud)**
+- `bridge.py` (memory-side, distinct from the process `tools/bridge.py`) parses `memwatch`
+  JSON, classifies OK/WATCH/DANGER, emits a 3-axis efficiency score and an LLM prompt.
+- `groq_client.py` calls Groq `openai/gpt-oss-120b` with a strict JSON schema (action,
+  target, `diagnosis`, reason, confidence); reads `GROQ_API_KEY` from `.env`.
+- `proposal_guard.py` / `hard_verifier.py` / `score_proto.py` validate and score the
+  proposal (protected processes checked **by name**, swap/quota safety constraints).
+- `run_pipeline.py` (analyze → propose → guard → dry-run apply) and the live runners
+  `memory_qemu_live_runner.py` / `memory_agent_loop.py` / `memory_live_groq_runner.py`
+  (boot QEMU, apply `setquota`/`swapctl`, verify, accept or QEMU-restart rollback).
+
+## Part 3 — Process: LLM advisor scheduler
+
+vanilla xv6's round-robin is replaced by a **priority scheduler**, and an external LLM
+(local Ollama) observes process state to apply **class / priority / job-group** policy.
+
+| Axis | stock xv6 | modern OS | LLM advisor |
 |---|---|---|---|
-| process(스케줄) | `getprocstat(_all)`, `getnamepriors` | `setpriority/setclass/setquantum/setjob*` | **로컬 Ollama** (`:11434`) |
-| memory(메모리) | `getmemstat`, `getswapstat` | `setmemquota`, `swapout` | **Groq 클라우드** (`gpt-oss`) |
+| who runs next | FIFO / arrival | priority queue + shell boost | name tag (`make`/`sh`/`cc`) pre-classified |
+| child class | copy parent prio | classify after observing | classified at `exec()` by name |
+| quantum | 1 tick for all | fixed per tier | inferred per process |
+| exit stats | discarded at `wait()` | ETW / `/proc` | accumulated as per-name priors |
+| fork-bomb | none until NPROC | `rlimit` / `pids.max` | semantic suspicious-tree detection |
 
-> 두 스택 모두 `bridge.py`를 갖지만 내용이 완전히 다름(935줄 차이) → 한 폴더에 두면 이름 충돌.
+**Kernel**
+- **Priority scheduler** (`kernel/proc.c::scheduler`) — `priority` 0 (highest)…20, single
+  best-candidate pass, `slice_used` reset + `ctxsw_count++` per dispatch.
+- **Classes / job groups** — `class_id`, `quantum_ticks`, `group_id` (inherited on fork →
+  whole `sh→make→cc` tree gets one BATCH policy via `setjob`).
+- **procstat counters** (clock-driven): `ready_ticks, run_ticks, sleep_ticks,
+  ctxsw_count, alloc_tick`; **name_priors** persist name→class learning across reboots.
+- **Dedicated virtio-console advisor channel** (`kernel/virtio_console.c`, "Plan A") on
+  the third virtio-mmio slot (**VIRTIO2**, `0x10003000`, IRQ 3 — moved up from VIRTIO1 so
+  swap can use bus.1). Exposed as `/advisor`; advisor traffic (`@@WL`/`setcls`) never
+  mixes with the UART human shell. Best-effort boot if the device is absent.
+- **Syscalls 22–35** — `getprocstat(_all)`, `getnamepriors`, `setpriority/getpriority`,
+  `setclass`, `setquantum`, `setjob/getjob/setjobpriority/setjobclass`, `setnamepriors`,
+  `note`, `crash`.
 
-## 통합 깊이 3단계 (Q4)
+**Userspace:** `advisord, advd, advstat, wl, wlagent, priors, jobtest, setcls, setjprio,
+iohog, cc, fbomb, crashme, ftree, priority_test, spin` — plus **`advmem`**, the unified
+tree's cross-control daemon that demotes a swap-pressured process to BATCH and restores it
+(hysteresis), linking the memory signal to the scheduler.
 
-### Level 0 — 공존만 (권장)
-한 커널/한 빌드에 두 기능이 모두 들어가지만 **서로 대화하지 않음**. 신규 로직 0, 순수 병합,
-리스크 최소. "두 기능이 한 OS에서 빌드·부팅·동작"을 증명하는 게 목표.
-
-### Level 1 — 공유 관측 (read-only)
-스케줄 advisor가 메모리 압박을 **볼 수 있게**만 함. `getprocstat` 스냅샷에
-`mem_quota/quota_denied_count/swapout_count/swapin_count`를 노출해 LLM이 thrashing을 *인지*.
-커널 변경 작음, 정책은 불변. 중간 리스크.
-
-### Level 2 — 교차 제어 / 정책 엔진 통합
-advisor가 메모리 신호에 **실제로 반응**(thrashing 프로세스 자동 강등 등)하거나
-두 LLM 파이프라인을 하나로 합침. 신규 로직 多 + 안전성 검증 필요. 사실상 신규 개발.
-
-| 항목 | L0 공존 | L1 관측 | L2 제어 |
-|---|---|---|---|
-| 커널 신규 로직 | 없음 | 적음 | 많음 |
-| 두 LLM 파이프라인 | 따로 | 따로(프롬프트만 확장) | 통합 검토 |
-| 리스크 | 낮음 | 중간 | 높음 |
-| 성격 | 순수 병합 | 병합+α | 신규 개발 |
-
-**제안**: 먼저 Level 0으로 공존을 확정한 뒤, 원하면 Level 1을 후속으로. Level 2는 별도 기획.
-
-## 파이썬 툴링 (Q5)
-- **A. 폴더만 분리(권장)** — `tools/advisor/`(Ollama) + `tools/memory/`(Groq), 코드 병합 없음.
-- **B. 공용 LLM 클라이언트 추출** — Ollama/Groq 추상화.
-- **C. 단일 파이프라인 통합** — ≈ Q4 Level 2.
-- Q5는 Q4에 종속: Level 0/1이면 자동으로 **A**, 최소한 `bridge.py` 이름 충돌만 폴더 분리로 해소.
-
-> 결정 대기 항목 전체는 `discuss.md` §8 표 참조.
-
----
-
-# Part 2 — xv6-memory: swap + 메모리 quota
-
-위치: `xv6-memory/xv6-kernel-bridge vanilla.ver/`. vanilla xv6에 **swap 서브시스템**과
-**프로세스별 메모리 quota** 를 추가했고, 메모리 정책을 외부 LLM(Groq)이 제안·검증하는
-파이프라인을 갖춘다.
-
-## 커널 구현
-- **swap 서브시스템** (`kernel/swap.c`, `swap.h`)
-  - 두 번째 virtio 디스크(`SWAPDEV=2`)를 64MB swap 영역으로 사용
-    (`NSWAP=16384` 슬롯 × 4KB; `Makefile`의 `swap.img dd count=64`와 일치 필수).
-  - victim 선택: 단순(첫 user page) / **A-bit Clock**(`-DSWAP_VICTIM_CLOCK=1`) 전환 가능.
-  - PTE 인코딩: swap된 페이지는 `V=0, U=1, PPN자리=swap slot`; lazy는 `*pte==0`.
-  - 호출 체인: `swapout(pid)` syscall → `select_victim` → `swap_write_slot` → `kfree`,
-    역방향은 page fault → `vmfault` → `swapin_page` → `swap_read_slot` → PTE 복구.
-- **메모리 quota** — `struct proc`에 `mem_quota`, `quota_denied_count` 추가.
-  `uvmalloc` 경로에서 quota 초과 alloc을 차단하고 차단 횟수를 누적.
-- **관측/제어 syscall**
-  - `getmemstat` — 프로세스별 `struct memstat`(pid/state/sz/mem_quota/quota_denied/swapout/swapin/name) 스냅샷.
-  - `setmemquota` — quota 설정, `swapout` — 강제 swapout, `getswapstat` — swap 통계.
-  - `trace` — syscall 추적 마스크(`trace_mask`).
-- `struct proc` 추가 필드: `mem_quota, quota_denied_count, trace_mask,
-  swap_clock_hand, swapout_count, swapin_count`.
-
-## userspace 프로그램
-`memstress, memfill, memhold, memwatch, memstat_test, setquota, swapctl, swaptest, trace_test`
-
-## LLM 정책 파이프라인 (Groq 클라우드)
-- `groq_client.py` — Groq `gpt-oss` 모델(openai 호환) 호출.
-- `proposal_guard.py` / `hard_verifier.py` / `score_proto.py` — 제안된 정책의 안전 검증·점수화.
-- `quota_agent_runner.py`, `quota_groq_retry_runner.py`, `quota_live_groq_runner.py`,
-  `quota_policy_runner.py` — quota 최적화 루프(제안→검증→적용→롤백).
-- `collect_memstress.py / collect_memwatch.py / collect_swap_scenario.py` — 시나리오 수집기.
-- `run_pipeline.py` — 통합 파이프라인 진입점.
+**LLM advisor (local Ollama)**
+```
+virtio-console  --@@WL frames-->  bridge.py  --HTTP-->  Ollama (local model)
+(unix socket)   <--"setcls .."--  bridge.py  <--JSON--  classification
+```
+- `tools/bridge.py` classifies `advd`-exported procstat via Ollama and applies decisions
+  through the existing `setclass` syscall — the kernel never knows an LLM exists.
+- `tools/diagnose.py` (offline fallback), `tools/test_advd.py` (UART-noninterference E2E).
+- Default model `qwen2.5:3b` (local, no API key, fully offline after pull).
 
 ---
 
-# Part 3 — xv6-process: LLM 어드바이저 스케줄러
+# 한국어
 
-위치: `xv6-process/`. vanilla xv6의 라운드로빈을 **우선순위 기반 스케줄러**로 바꾸고,
-프로세스 상태를 외부 LLM(로컬 Ollama)이 관찰해 **분류·우선순위·job 그룹 정책**을 적용한다.
+## 빌드 & 실행
 
-## 핵심 비교 — 세 가지 스케줄러 방식
+```sh
+cd xv6-JPLKJ
+
+# 기본 `make`는 커널만 빌드한다 — fs.img / swap.img 는 명시적으로 지정.
+make TOOLPREFIX=riscv64-elf- kernel/kernel fs.img swap.img
+
+# QEMU 부팅 (virtio-mmio 3개: fs=bus.0, swap=bus.1, advisor 콘솔=bus.2)
+make qemu CPUS=1
+```
+
+RISC-V "newlib" 툴체인과 `riscv64-softmmu` QEMU가 필요하다
+(<https://pdos.csail.mit.edu/6.1810/>). `swap.img`는 64 MB 두 번째 virtio 디스크
+(`dd count=64`, `NSWAP`와 일치해야 함).
+
+**선택 — LLM 파이프라인** (없어도 커널은 정상 부팅·동작):
+
+```sh
+# Part 3 — 프로세스 어드바이저 (로컬, API 키 불필요, pull 후 오프라인)
+brew install ollama && ollama pull qwen2.5:3b
+python3 tools/bridge.py                 # 호스트 브리지 → Ollama → setclass
+
+# Part 2 — 메모리 정책 (Groq 클라우드)
+pip install groq python-dotenv pexpect
+echo 'GROQ_API_KEY=gsk_...' > .env       # groq_client.py 가 python-dotenv 로 읽음
+python3 memory_qemu_live_runner.py --approve   # 풀 라이브 루프: QEMU → bridge → Groq → verify
+```
+
+## Part 2 — 메모리: swap + 메모리 quota
+
+커널에 **swap 서브시스템**과 **프로세스별 메모리 quota**를 추가하고, 메모리 정책을 외부
+LLM(Groq 클라우드)이 제안·검증하는 호스트측 파이프라인을 갖춘다.
+
+**커널** (`kernel/swap.c`, `swap.h`)
+- **swap** — 두 번째 virtio 디스크(`SWAPDEV=2`, `NSWAP=16384` 슬롯 × 4 KB). victim 선택은
+  단순(첫 user page) 또는 **A-bit Clock**(`-DSWAP_VICTIM_CLOCK=1`). swap된 PTE는
+  `V=0, U=1, PPN←slot`, lazy는 `*pte==0`. 체인: `swapout(pid)` → `select_victim` →
+  `swap_write_slot` → `kfree`, 역방향은 fault → `vmfault` → `swapin_page` →
+  `swap_read_slot` → PTE 복구.
+- **quota** — `uvmalloc`에서 `mem_quota` 초과 alloc을 차단하고 `quota_denied_count` 누적.
+- **syscall 36–40** — `getmemstat`(36), `setmemquota`(37), `swapout`(38),
+  `getswapstat`(39), `trace`(40). (병합 시 충돌을 피해 프로세스 서브시스템의 22–35 위로 재번호.)
+- `struct proc` 추가 필드: `mem_quota, quota_denied_count, trace_mask, swap_clock_hand,
+  swapout_count, swapin_count`.
+
+**userspace:** `memstress, memfill, memhold, memwatch, memstat_test, setquota, swapctl,
+swaptest, trace_test`.
+
+**LLM 정책 파이프라인 (Groq 클라우드)**
+- `bridge.py` (메모리용, 프로세스의 `tools/bridge.py`와 다른 파일) — `memwatch` JSON을
+  파싱해 OK/WATCH/DANGER 분류, 3축 효율성 점수와 LLM 프롬프트 생성.
+- `groq_client.py` — Groq `openai/gpt-oss-120b`를 strict JSON 스키마(action, target,
+  `diagnosis`, reason, confidence)로 호출. `GROQ_API_KEY`는 `.env`에서 읽음.
+- `proposal_guard.py` / `hard_verifier.py` / `score_proto.py` — 제안 안전 검증·점수화
+  (보호 프로세스는 **이름 기준** 판정, swap/quota 안전 제약 적용).
+- `run_pipeline.py` (분석 → 제안 → guard → dry-run 적용) + 라이브 러너
+  `memory_qemu_live_runner.py` / `memory_agent_loop.py` / `memory_live_groq_runner.py`
+  (QEMU 부팅 → `setquota`/`swapctl` 적용 → 검증 → accept 또는 QEMU 재시작 롤백).
+
+## Part 3 — 프로세스: LLM 어드바이저 스케줄러
+
+vanilla xv6의 라운드로빈을 **우선순위 스케줄러**로 바꾸고, 프로세스 상태를 외부
+LLM(로컬 Ollama)이 관찰해 **클래스 · 우선순위 · job 그룹** 정책을 적용한다.
+
 | 축 | 기존 xv6 | 현대 OS | LLM 어드바이저 |
 |---|---|---|---|
-| 누가 다음으로 일하나 | FIFO·도착 순서 | 우선순위 큐 + 셸 자동 승격 | 이름표(`make`/`sh`/`cc`)로 사전 분류 |
-| 자식 분류 시점 | 부모 우선순위 복사 | 실행 관찰 후 분류 | `exec()` 직후 이름으로 즉시 분류 |
-| Quantum 길이 | 전원 동일 1 tick | 등급별 고정값 | 프로세스 특성에 맞춘 추론값 |
-| 종료 통계 | 휘발(`wait()`시 폐기) | ETW·`/proc` 축적 | 이름별 prior로 누적 학습 |
-| fork bomb 방어 | NPROC 한도까지 무방어 | `rlimit`/`pids.max` 양적 한도 | 의미·패턴 기반 의심 트리 탐지 |
+| 누가 다음에 실행 | FIFO·도착순 | 우선순위 큐 + 셸 승격 | 이름표(`make`/`sh`/`cc`) 사전 분류 |
+| 자식 분류 | 부모 우선순위 복사 | 실행 관찰 후 분류 | `exec()` 직후 이름으로 분류 |
+| Quantum | 전원 1 tick | 등급별 고정 | 프로세스별 추론값 |
+| 종료 통계 | `wait()`시 폐기 | ETW·`/proc` | 이름별 prior로 누적 학습 |
+| fork bomb | NPROC까지 무방어 | `rlimit`/`pids.max` | 의미·패턴 기반 의심 트리 탐지 |
 
-LLM 어드바이저는 현대 OS의 행동 관찰을 *대체하지 않고 보강* — 행동을 보기 **전**의 의미 정보를 활용한다.
+**커널**
+- **우선순위 스케줄러** (`kernel/proc.c::scheduler`) — `priority` 0(최고)~20, 단일 패스로
+  best 후보 선택, dispatch마다 `slice_used` 리셋 + `ctxsw_count++`.
+- **클래스 / job 그룹** — `class_id`, `quantum_ticks`, `group_id`(fork 시 상속 →
+  `sh→make→cc` 트리 전체에 BATCH 정책을 `setjob`으로 일괄 적용).
+- **procstat 카운터**(clock 구동): `ready_ticks, run_ticks, sleep_ticks, ctxsw_count,
+  alloc_tick`; **name_priors**는 이름→클래스 학습을 재부팅 후에도 유지.
+- **virtio-console 전용 어드바이저 채널**(`kernel/virtio_console.c`, "Plan A") — 세 번째
+  virtio-mmio 슬롯(**VIRTIO2**, `0x10003000`, IRQ 3 — swap이 bus.1을 쓰도록 VIRTIO1에서
+  올림)을 `/advisor` 디바이스로 노출. advisor 트래픽(`@@WL`/`setcls`)이 UART(사람 셸)와
+  절대 섞이지 않음. 디바이스 부재 시 panic 없이 best-effort 부팅.
+- **syscall 22–35** — `getprocstat(_all)`, `getnamepriors`, `setpriority/getpriority`,
+  `setclass`, `setquantum`, `setjob/getjob/setjobpriority/setjobclass`, `setnamepriors`,
+  `note`, `crash`.
 
-## 커널 구현
-- **우선순위 스케줄러** (`kernel/proc.c::scheduler`)
-  - `priority` 0(최고)~20(최저), 단일 패스로 best 후보 선택, 동순위는 선형 스캔 라운드로빈.
-  - dispatch마다 `slice_used` 리셋, `ctxsw_count++` (advisord가 관측).
-- **스케줄링 클래스 / job 그룹**
-  - `class_id`(CLASS_*), `quantum_ticks`(슬라이스 길이), `group_id`(job/process-group).
-  - `group_id`는 fork 시 상속 → `sh→make→cc` 트리 전체에 BATCH 정책을 일괄 적용(`setjob`).
-- **procstat 카운터** (clockintr 구동): `ready_ticks, run_ticks, sleep_ticks,
-  ctxsw_count, alloc_tick`.
-- **name_priors 영속화** — 이름 기반 클래스 학습을 재부팅 후에도 유지.
-- **virtio-console 전용 어드바이저 채널** (`kernel/virtio_console.c`, "Plan A")
-  - 두 번째 virtio-mmio 슬롯(`0x10002000`, IRQ 2)을 `/advisor` 디바이스 파일로 노출.
-  - advisor 트래픽(`@@WL`/`setcls`)이 UART(사람 셸)와 **절대 섞이지 않음**.
-  - 디바이스 부재 시 panic 없이 best-effort 부팅.
-- **관측/제어 syscall**: `getprocstat(_all)`, `getnamepriors`, `setpriority/getpriority`,
-  `setclass`, `setquantum`, `setjob/getjob/setjobpriority/setjobclass`,
-  `setnamepriors`, `note`, `crash`.
-- `struct proc` 추가 필드: `priority, class_id, quantum_ticks, slice_used, group_id,
-  ready_ticks, run_ticks, sleep_ticks, ctxsw_count, alloc_tick`.
+**userspace:** `advisord, advd, advstat, wl, wlagent, priors, jobtest, setcls, setjprio,
+iohog, cc, fbomb, crashme, ftree, priority_test, spin` — 그리고 통합 트리의 교차 제어
+데몬 **`advmem`**: swap 압박 프로세스를 BATCH로 강등했다가 복원(hysteresis)해 메모리
+신호를 스케줄러에 연결한다.
 
-## userspace 프로그램
-`advisord, advd, advstat, wl, wlagent, priors, jobtest, setcls, setjprio,
-iohog, cc, fbomb, crashme, ftree, priority_test, spin`
-
-## LLM 어드바이저 (로컬 Ollama)
+**LLM 어드바이저 (로컬 Ollama)**
 ```
 virtio-console  --@@WL frames-->  bridge.py  --HTTP-->  Ollama (로컬 모델)
 (unix socket)   <--"setcls .."--  bridge.py  <--JSON--  classification
 ```
-- `tools/bridge.py` — 호스트 측 브리지. `advd`가 export한 procstat을 Ollama로 분류,
-  결정을 기존 `setclass` syscall로 적용(커널은 LLM 존재를 모름).
-- `tools/diagnose.py` — 진단(오프라인 폴백 지원).
-- `tools/test_advd.py` — UART 무간섭 end-to-end 검증.
-- 기본 모델 `qwen2.5:3b` (로컬, API 키 불필요, pull 후 완전 오프라인);
-  지연 튜닝 노브: `num_ctx`/`num_predict`/`keep_alive`.
-
----
-
-## 디렉토리
-- `xv6-process/` — LLM advisor 스케줄러 (Part 3)
-- `xv6-memory/`  — swap + 메모리 quota (Part 2)
-- `xv6-copy/`    — 비교용 stock xv6 사본
-- `report/weekNN/` — 주차별 보고서 (week09 ~ week14)
-
-## 주요 보고서
-- **▶ [스케줄러 3종 비교 (Live 페이지)](https://philocsera.github.io/OS_JPLKJ/description.html)** — GitHub Pages 인터랙티브 보고서 (소스: [report/week13/조현성/process_summary.html](report/week13/조현성/process_summary.html))
-
-## 빌드 & 실행 (각 트리 공통)
-```sh
-make clean && make
-make qemu        # TOOLPREFIX=riscv64-elf-
-```
-xv6 자체는 RISC-V "newlib" 툴체인과 riscv64-softmmu QEMU가 필요하다
-(https://pdos.csail.mit.edu/6.1810/).
+- `tools/bridge.py` — `advd`가 export한 procstat을 Ollama로 분류, 결정을 기존 `setclass`
+  syscall로 적용(커널은 LLM 존재를 모름).
+- `tools/diagnose.py`(오프라인 폴백), `tools/test_advd.py`(UART 무간섭 E2E 검증).
+- 기본 모델 `qwen2.5:3b`(로컬, API 키 불필요, pull 후 완전 오프라인).
